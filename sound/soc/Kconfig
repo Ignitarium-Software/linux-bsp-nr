@@ -84,6 +84,13 @@ config SND_SOC_UTILS_KUNIT_TEST
 config SND_SOC_ACPI
 	tristate
 
+config SND_SOC_DSP_PCM_PLATFORM
+	tristate "DSP-based PCM platform driver"
+	depends on SND_SOC && HAS_IOMEM
+	select SND_PCM
+	help
+	  ALSA PCM driver for DSP audio shared memory transfer.
+
 # All the supported SoCs
 source "sound/soc/adi/Kconfig"
 source "sound/soc/amd/Kconfig"
