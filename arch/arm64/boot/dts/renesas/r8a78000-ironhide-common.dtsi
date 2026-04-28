@@ -415,7 +415,12 @@
 };
 
 &mfis {
-	renesas,mfis-channels = <1>;
+	renesas,mfis-channels = <0 1>;
+	status = "okay";
+};
+
+&cr52_rproc0 {
+	memory-region = <&cr52_ram0>;
 	status = "okay";
 };
 
