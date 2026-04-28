@@ -146,8 +146,14 @@
 		linux,cma@a2600000 {
 			compatible = "shared-dma-pool";
 			reusable;
-			reg = <0x0 0xa2600000 0x0 0x1da00000>;
+			reg = <0x0 0xa2600000 0x0 0x1d600000>;
 			linux,cma-default;
+		};
+
+		dsp_audio_shmem: dsp-audio-shmem@bfc00000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbfc00000 0x0 0x20000>;
+			no-map;
 		};
 
 		ecc_data_region@10cccc0000 {
