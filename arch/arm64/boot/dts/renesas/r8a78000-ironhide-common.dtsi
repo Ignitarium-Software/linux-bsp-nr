@@ -150,9 +150,27 @@
 			linux,cma-default;
 		};
 
-		dsp_audio_shmem: dsp-audio-shmem@bfc00000 {
+		pcm_g0: pcm-g0@bfc00000 {
 			compatible = "shared-dma-pool";
 			reg = <0x0 0xbfc00000 0x0 0x20000>;
+			no-map;
+		};
+
+		pcm_g1: pcm-g1@bfc20000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbfc20000 0x0 0x20000>;
+			no-map;
+		};
+
+		pcm_g2: pcm-g2@bfc40000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbfc40000 0x0 0x20000>;
+			no-map;
+		};
+
+		pcm_g3: pcm-g3@bfc60000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbfc60000 0x0 0x20000>;
 			no-map;
 		};
 
@@ -179,11 +197,6 @@
 		ecc_data_region@16cccc0000 {
 			no-map;
 			reg = <0x16 0xcccd0000 0x0 0x33330000>;
-		};
-
-		gsx_lma_heap@1800000000 {
-			no-map;
-			reg = <0x18 0x00000000 0x0 0xcccd0000>;
 		};
 
 		ecc_data_region@18cccc0000 {
@@ -421,25 +434,12 @@
 };
 
 &mfis {
-	renesas,mfis-channels = <0 1>;
+	renesas,mfis-channels = <0>;
 	status = "okay";
 };
 
 &cr52_rproc0 {
 	memory-region = <&cr52_ram0>;
-	status = "okay";
-};
-
-&cr52_rproc1 {
-	memory-region = <&cr52_ram1>;
-	status = "okay";
-};
-
-&rpmsg_shm0 {
-	status = "okay";
-};
-
-&rpmsg_ipi0 {
 	status = "okay";
 };
 
