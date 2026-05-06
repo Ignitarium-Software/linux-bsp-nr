@@ -443,6 +443,19 @@
 	status = "okay";
 };
 
+&cr52_rproc1 {
+	memory-region = <&cr52_ram1>;
+	status = "disabled";
+};
+
+&rpmsg_shm0 {
+	status = "disabled";
+};
+
+&rpmsg_ipi0 {
+	status = "disabled";
+};
+
 &cmt0 {
 	status = "okay";
 };
