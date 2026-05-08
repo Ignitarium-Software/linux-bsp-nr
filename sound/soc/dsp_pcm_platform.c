@@ -10,6 +10,10 @@
 #include <linux/dma-direct.h>
 #include <linux/rpmsg.h>
 #include <linux/delay.h>
+#include <linux/wait.h>
+#include <linux/jiffies.h>
+#include <linux/ktime.h>
+#include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <sound/soc.h>
@@ -17,7 +21,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
-#define BUFFER_LEN (4096U) /* 4kB */
+#define BUFFER_LEN (32768U) /* 32kB */
 #define MAX_DEVICES (4U) /* Maximum number of pairs ALSA instances */
 
 /* DSP Control Message type */
@@ -130,16 +134,17 @@ struct rcar_alsa_priv {
     struct workqueue_struct *rpmsg_wq_cr;
     struct workqueue_struct *rpmsg_wq_dsp;
 
-    volatile int dsp_reply_flag;
+    volatile bool dsp_reply_flag;
     volatile struct RpMsgPacket dsp_reply_msg;
 
+    wait_queue_head_t dsp_wait_q;
     spinlock_t dsp_status_lock;
 };
 
 struct rpmsg_work_dsp {
     struct work_struct work;
     struct RpMsgPacket msg;
-    struct rcar_alsa_priv priv;
+    struct rcar_alsa_priv *priv;
 };
 
 struct rcar_alsa_priv *global_alsa_priv[MAX_DEVICES];
@@ -154,32 +159,36 @@ static int rpmsg_send_dsp(struct RpMsgPacket msg, struct rcar_alsa_priv *d)
     return rpmsg_send(d->dsp_rpdev->ept, &msg, sizeof(msg));
 }
 
-static struct DspStatusMsg rpmsg_recv_dsp_blocking(int *status, unsigned int timeout_ms, struct rcar_alsa_priv *d)
+static int rpmsg_recv_dsp_blocking(int *msg_type, struct DspStatusMsg *status, unsigned int timeout_ms, struct rcar_alsa_priv *d)
 {
+    long ret;
     unsigned long flags;
-    int temp_reply;
-    struct RpMsgPacket temp_msg;
 
-    do {
-        spin_lock_irqsave(&d->dsp_status_lock, flags);
-        temp_reply = d->dsp_reply_flag;
-        temp_msg = d->dsp_reply_msg;
+    ret = wait_event_interruptible_timeout(d->dsp_wait_q, READ_ONCE(d->dsp_reply_flag),
+        msecs_to_jiffies(timeout_ms));
+
+    if (ret == 0) {
+        pr_err("%s: timeout\n", __func__);
+        return -ETIMEDOUT;
+    }
+
+    if (ret < 0) {
+        pr_err("%s: error(%d)\n", __func__, ret);
+        return ret;
+    }
+
+    spin_lock_irqsave(&d->dsp_status_lock, flags);
+    if (!d->dsp_reply_flag) {
         spin_unlock_irqrestore(&d->dsp_status_lock, flags);
+        return -EAGAIN;
+    }
 
-        if (temp_reply) {
-            *status = temp_msg.header.msg_type;
+    *status = d->dsp_reply_msg.payload.dsp_status;
+    *msg_type = d->dsp_reply_msg.header.msg_type;
+    d->dsp_reply_flag = false;
+    spin_unlock_irqrestore(&d->dsp_status_lock, flags);
 
-            spin_lock_irqsave(&d->dsp_status_lock, flags);
-            d->dsp_reply_flag = 0;
-            spin_unlock_irqrestore(&d->dsp_status_lock, flags);
-
-            return temp_msg.payload.dsp_status;
-        }
-
-        if (timeout_ms != 0) msleep(1);
-    } while(timeout_ms --);
-
-    return temp_msg.payload.dsp_status;
+    return 0;
 }
 
 static int rcar_alsa_fe_pcm_open(struct snd_pcm_substream *sub)
@@ -201,27 +210,29 @@ static int rcar_alsa_fe_pcm_open(struct snd_pcm_substream *sub)
     runtime->hw.buffer_bytes_max = BUFFER_LEN;
     runtime->hw.period_bytes_min = 1024;
     runtime->hw.period_bytes_max = 1024;
-    runtime->hw.periods_min = 4;
-    runtime->hw.periods_max = 4;
+    runtime->hw.periods_min = 32;
+    runtime->hw.periods_max = 32;
 
     runtime->private_data = d;
 
     return 0;
 }
 
-static int dsp_pcm_hw_params(struct snd_pcm_substream *sub, struct snd_pcm_hw_params *params)
+static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub, struct snd_pcm_hw_params *params)
 {
     size_t buffer_bytes = params_buffer_bytes(params);
     struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
     struct platform_device *pdev = d->pdev;
     struct rcar_alsa_stream *s = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? &d->rcar_pb_stream : &d->rcar_cap_stream;
+    struct RpMsgPacket msg;
+    int type;
+    int ret;
+    struct DspStatusMsg dsp_status;
 
     if (buffer_bytes != BUFFER_LEN) {
         pr_err("rcar_audio_fe: %s error invalid buffer_bytes\n", __func__);
         return -EINVAL;
     }
-
-    snd_pcm_set_managed_buffer(sub, SNDRV_DMA_TYPE_DEV, &pdev->dev, BUFFER_LEN, BUFFER_LEN);
 
     pr_info("audio_ctrl_rpmsg: %s PCM buffer_bytes=%zu PCM dma_addr=%pad\n", __func__, buffer_bytes, &sub->dma_buffer.addr);
 
@@ -233,10 +244,6 @@ static int dsp_pcm_hw_params(struct snd_pcm_substream *sub, struct snd_pcm_hw_pa
     }
 
     pr_info("audio_ctrl_rpmsg: %s HW buffer_bytes=%zu HW dma_addr=%pad\n", __func__, s->hw_buf_size, &s->hw_dma_handle);
-
-    struct RpMsgPacket msg;
-    int status;
-    struct DspStatusMsg dsp_status;
 
     /* header */
     msg.header.version = 1;
@@ -258,21 +265,26 @@ static int dsp_pcm_hw_params(struct snd_pcm_substream *sub, struct snd_pcm_hw_pa
     msg.payload.dsp_config.hw_rb_phys = (uint64_t)dma_to_phys(&pdev->dev, s->hw_dma_handle);
     msg.payload.dsp_config.hw_rb_size = (uint64_t)s->hw_buf_size;
     msg.payload.dsp_config.period_frames = 256;
-    msg.payload.dsp_config.periods = 4;
+    msg.payload.dsp_config.periods = 32;
 
     rpmsg_send_dsp(msg, d);
 
     /* Wait for response from DSP */
-    dsp_status = rpmsg_recv_dsp_blocking(&status, 5, d);
-    if (status != kConfigReply) {
-        pr_err("rcar_audio_fe: %s: error response from DSP\n", __func__);
+    ret = rpmsg_recv_dsp_blocking(&type, &dsp_status, 10, d);
+    if (ret) {
+        pr_err("rcar_audio_fe: %s: no response from DSP ret(%d)\n", __func__, ret);
+        return ret;
+    }
+
+    if (type != kConfigReply) {
+        pr_err("rcar_audio_fe: %s: error response from DSP, type(0x%x)\n", __func__, type);
         return -EAGAIN;
     }
 
     return 0;
 }
 
-static int dsp_pcm_hw_free(struct snd_pcm_substream *sub)
+static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 {
     struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
     struct platform_device *pdev = d->pdev;
@@ -287,7 +299,7 @@ static int dsp_pcm_hw_free(struct snd_pcm_substream *sub)
     return 0;
 }
 
-static int dsp_pcm_prepare(struct snd_pcm_substream *sub)
+static int rcar_audio_fe_pcm_prepare(struct snd_pcm_substream *sub)
 {
     struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
 
@@ -302,7 +314,7 @@ static int dsp_pcm_prepare(struct snd_pcm_substream *sub)
     return 0;
 }
 
-static int dsp_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
+static int rcar_audio_fe_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
 {
     struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
     struct RpMsgPacket msg;
@@ -368,7 +380,7 @@ static int dsp_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
     }
 }
 
-static snd_pcm_uframes_t dsp_pcm_pointer(struct snd_pcm_substream *sub)
+static snd_pcm_uframes_t rcar_audio_fe_pcm_pointer(struct snd_pcm_substream *sub)
 {
     struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
     size_t hwptr = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? d->rcar_pb_stream.hw_ptr_bytes: d->rcar_cap_stream.hw_ptr_bytes;
@@ -376,19 +388,19 @@ static snd_pcm_uframes_t dsp_pcm_pointer(struct snd_pcm_substream *sub)
     return bytes_to_frames(sub->runtime, hwptr);
 }
 
-static int dsp_pcm_mmap(struct snd_pcm_substream *sub, struct vm_area_struct *vma)
+static int rcar_audio_fe_pcm_mmap(struct snd_pcm_substream *sub, struct vm_area_struct *vma)
 {
     pr_info("rcar_audio_fe: %s\n", __func__);
     return snd_pcm_lib_default_mmap(sub, vma);
 }
 
-static int dsp_pcm_close(struct snd_pcm_substream *sub)
+static int rcar_audio_fe_pcm_close(struct snd_pcm_substream *sub)
 {
     pr_info("rcar_audio_fe: %s\n", __func__);
     return 0;
 }
 
-static int dsp_pcm_copy_user(struct snd_pcm_substream *substream, int channel, unsigned long pos,
+static int rcar_audio_fe_pcm_copy_user(struct snd_pcm_substream *substream, int channel, unsigned long pos,
         void __user *buf, unsigned long bytes)
 {
     struct snd_pcm_runtime *runtime = substream->runtime;
@@ -405,20 +417,20 @@ static int dsp_pcm_copy_user(struct snd_pcm_substream *substream, int channel, u
     return 0;
 }
 
-static const struct snd_pcm_ops dsp_snd_pcm_ops = {
+static const struct snd_pcm_ops rcar_audio_pcm_ops = {
     .open      = rcar_alsa_fe_pcm_open,
-    .close     = dsp_pcm_close,
-    .hw_params = dsp_pcm_hw_params,
-    .hw_free   = dsp_pcm_hw_free,
-    .prepare   = dsp_pcm_prepare,
-    .trigger   = dsp_pcm_trigger,
-    .pointer   = dsp_pcm_pointer,
-    .mmap      = dsp_pcm_mmap,
-    .copy_user = dsp_pcm_copy_user,
+    .close     = rcar_audio_fe_pcm_close,
+    .hw_params = rcar_audio_fe_pcm_hw_params,
+    .hw_free   = rcar_audio_fe_pcm_hw_free,
+    .prepare   = rcar_audio_fe_pcm_prepare,
+    .trigger   = rcar_audio_fe_pcm_trigger,
+    .pointer   = rcar_audio_fe_pcm_pointer,
+    .mmap      = rcar_audio_fe_pcm_mmap,
+    .copy_user = rcar_audio_fe_pcm_copy_user,
 };
 
 /* ALSA card + PCM creation */
-static int dsp_pcm_create(struct platform_device *pdev, struct rcar_alsa_priv *d)
+static int rcar_audio_pcm_create(struct platform_device *pdev, struct rcar_alsa_priv *d)
 {
     int ret;
 
@@ -437,8 +449,10 @@ static int dsp_pcm_create(struct platform_device *pdev, struct rcar_alsa_priv *d
     d->pcm->private_data = d;
 
     /* Assign PCM ops */
-    snd_pcm_set_ops(d->pcm, SNDRV_PCM_STREAM_PLAYBACK, &dsp_snd_pcm_ops);
-    snd_pcm_set_ops(d->pcm, SNDRV_PCM_STREAM_CAPTURE, &dsp_snd_pcm_ops);
+    snd_pcm_set_ops(d->pcm, SNDRV_PCM_STREAM_PLAYBACK, &rcar_audio_pcm_ops);
+    snd_pcm_set_ops(d->pcm, SNDRV_PCM_STREAM_CAPTURE, &rcar_audio_pcm_ops);
+
+    snd_pcm_set_managed_buffer_all(d->pcm, SNDRV_DMA_TYPE_DEV, &pdev->dev, BUFFER_LEN, BUFFER_LEN);
 
     /* Register the card */
     ret = snd_card_register(d->card);
@@ -481,7 +495,7 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
     snd_pcm_period_elapsed(sub);
 }
 
-static int dsp_pcm_probe(struct platform_device *pdev)
+static int rcar_audio_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
@@ -540,10 +554,10 @@ static int dsp_pcm_probe(struct platform_device *pdev)
         return ret;
     }
 
-    /* IMPORTANT: Create ALSA card + PCM device */
-    ret = dsp_pcm_create(pdev, d);
+    /* Create ALSA card + PCM device */
+    ret = rcar_audio_pcm_create(pdev, d);
     if (ret) {
-        dev_err(dev, "dsp_pcm_create failed: %d\n", ret);
+        dev_err(dev, "rcar_audio_pcm_create failed: %d\n", ret);
         of_reserved_mem_device_release(dev);
         return ret;
     }
@@ -552,7 +566,7 @@ static int dsp_pcm_probe(struct platform_device *pdev)
     return 0;
 }
 
-static int dsp_pcm_remove(struct platform_device *pdev)
+static int rcar_audio_remove(struct platform_device *pdev)
 {
     struct rcar_alsa_priv *d = platform_get_drvdata(pdev);
 
@@ -567,18 +581,18 @@ static int dsp_pcm_remove(struct platform_device *pdev)
     return 0;
 }
 
-static const struct of_device_id dsp_pcm_of_match[] = {
+static const struct of_device_id rcar_audio_of_match[] = {
     { .compatible = "renesas,rcar_audio_fe" },
     {}
 };
-MODULE_DEVICE_TABLE(of, dsp_pcm_of_match);
+MODULE_DEVICE_TABLE(of, rcar_audio_of_match);
 
 static struct platform_driver dsp_pcm_driver = {
-    .probe = dsp_pcm_probe,
-    .remove = dsp_pcm_remove,
+    .probe = rcar_audio_probe,
+    .remove = rcar_audio_remove,
     .driver = {
-        .name = "dsp-pcm-platform",
-        .of_match_table = dsp_pcm_of_match,
+        .name = "rcar-audio-fe",
+        .of_match_table = rcar_audio_of_match,
     },
 };
 module_platform_driver(dsp_pcm_driver);
@@ -606,17 +620,29 @@ static bool rpmsg_is_cr(char *name, struct rcar_alsa_priv *d) {
 static void rpmsg_dsp_handle(struct work_struct *work)
 {
     struct rpmsg_work_dsp *w = container_of(work, struct rpmsg_work_dsp, work);
-    struct rcar_alsa_priv *d = &w->priv;
+    struct rcar_alsa_priv *d = w->priv;
     struct RpMsgPacket *msg = &w->msg;
     unsigned long flags;
+    bool drop_msg = false;
 
     switch(msg->header.msg_type) {
     case kConfigReply:
     case kPosReply:
         spin_lock_irqsave(&d->dsp_status_lock, flags);
-        d->dsp_reply_flag = 1;
+        if (d->dsp_reply_flag) {
+            /* drop unhandled previous message */
+            drop_msg = true;
+        }
+
+        d->dsp_reply_flag = true;
         d->dsp_reply_msg = *msg;
         spin_unlock_irqrestore(&d->dsp_status_lock, flags);
+        wake_up_interruptible(&d->dsp_wait_q);
+
+        if (drop_msg) {
+            pr_warn("audio_ctrl_rpmsg: %s: Discarding unused previous message\n", __func__);
+            drop_msg = false;
+        }
         break;
 
     case kStatus:
@@ -650,9 +676,15 @@ static int rpmsg_audio_ctrl_cb(struct rpmsg_device *rpdev, void *data, int len,
             if (w) {
                 INIT_WORK(&w->work, rpmsg_dsp_handle);
                 w->msg = *msg;
-                w->priv = *d;
+                w->priv = d;
                 queue_work(d->rpmsg_wq_dsp, &w->work);
+            } else {
+                pr_err("audio_ctrl_rpmsg: %s: kmalloc failed\n", __func__);
+                return -ENOMEM;
             }
+        } else {
+            pr_err("audio_ctrl_rpmsg: %s: No workqueue\n", __func__);
+            return -EINVAL;
         }
     }
     return 0;
@@ -682,9 +714,9 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
     if (rpmsg_is_cr(rpdev->id.name, d)) {
         d->cr_rpdev = rpdev;
     } else {
-        d->rpmsg_wq_dsp = create_workqueue("rpmsg_dsp_workqueue");
+        d->rpmsg_wq_dsp = create_singlethread_workqueue("rpmsg_dsp_workqueue");
         if (!d->rpmsg_wq_dsp) {
-            dev_err(&rpdev->dev, "create_workqueue for dsp failed\n");
+            dev_err(&rpdev->dev, "create_singlethread_workqueue for dsp failed\n");
             return -EPROTO;
         }
 
@@ -704,7 +736,9 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
         return ret;
     }
 
+    init_waitqueue_head(&d->dsp_wait_q);
     spin_lock_init(&d->dsp_status_lock);
+    d->dsp_reply_flag = false;
 
     dev_info(&rpdev->dev, "rpmsg audio dsp new channel: 0x%x -> 0x%x!\n",
         rpdev->src, rpdev->dst);
