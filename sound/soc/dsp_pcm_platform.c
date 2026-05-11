@@ -23,6 +23,7 @@
 
 #define BUFFER_LEN (32768U) /* 32kB */
 #define MAX_DEVICES (4U) /* Maximum number of pairs ALSA instances */
+#define DSP_RESP_TIMEOUT_MS (100U)
 
 /* DSP Control Message type */
 #define kConfigReq       0x2001   /* CA→DSP */
@@ -177,6 +178,8 @@ static int rpmsg_recv_dsp_blocking(int *msg_type, struct DspStatusMsg *status, u
         return ret;
     }
 
+    pr_info("%s: got response after %dms, timeout %dms\n", __func__, (timeout_ms - jiffies_to_msecs(ret)), timeout_ms);
+
     spin_lock_irqsave(&d->dsp_status_lock, flags);
     if (!d->dsp_reply_flag) {
         spin_unlock_irqrestore(&d->dsp_status_lock, flags);
@@ -270,7 +273,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub, struct snd
     rpmsg_send_dsp(msg, d);
 
     /* Wait for response from DSP */
-    ret = rpmsg_recv_dsp_blocking(&type, &dsp_status, 10, d);
+    ret = rpmsg_recv_dsp_blocking(&type, &dsp_status, DSP_RESP_TIMEOUT_MS, d);
     if (ret) {
         pr_err("rcar_audio_fe: %s: no response from DSP ret(%d)\n", __func__, ret);
         return ret;
