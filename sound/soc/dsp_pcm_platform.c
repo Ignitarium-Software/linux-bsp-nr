@@ -16,6 +16,9 @@
 #include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#include <linux/uaccess.h>
 #include <sound/soc.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -113,6 +116,17 @@ struct rcar_alsa_stream {
 	void *hw_cpu_addr;
 };
 
+/* debugfs entries */
+struct dsp_dbg_stream {
+	struct mutex lock;
+	void *cpu_addr;
+	dma_addr_t dma_addr;
+	size_t bytes;
+	size_t period_bytes;
+	bool valid;
+	const char *name;
+};
+
 struct rcar_alsa_priv {
 	/* common parameters */
 	int group_id;
@@ -140,6 +154,11 @@ struct rcar_alsa_priv {
 
 	wait_queue_head_t dsp_wait_q;
 	spinlock_t dsp_status_lock;
+
+	/* debugfs entires */
+	struct dentry *dbg_root;
+	struct dsp_dbg_stream dbg_playback;
+	struct dsp_dbg_stream dbg_capture;
 };
 
 struct rpmsg_work_dsp {
@@ -177,7 +196,7 @@ static int rpmsg_recv_dsp_blocking(int *msg_type, struct dsp_status_msg *status,
 	}
 
 	if (ret < 0) {
-		pr_err("%s: error(%d)\n", __func__, ret);
+		pr_err("%s: error(%ld)\n", __func__, ret);
 		return ret;
 	}
 
@@ -237,6 +256,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	int type;
 	int ret;
 	struct dsp_status_msg dsp_status;
+	struct dsp_dbg_stream *dbg;
 
 	if (buffer_bytes != BUFFER_LEN) {
 		pr_err("rcar_audio_fe: %s error invalid buffer_bytes\n",
@@ -258,6 +278,15 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 
 	pr_info("audio_ctrl_rpmsg: %s HW buffer_bytes=%zu HW dma_addr=%pad\n",
 			__func__, s->hw_buf_size, &s->hw_dma_handle);
+
+	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? &d->dbg_playback : &d->dbg_capture;
+	mutex_lock(&dbg->lock);
+	dbg->cpu_addr = s->hw_cpu_addr;
+	dbg->dma_addr = s->hw_dma_handle;
+	dbg->bytes = s->hw_buf_size;
+	dbg->period_bytes = params_period_bytes(params);
+	dbg->valid = true;
+	mutex_unlock(&dbg->lock);
 
 	/* header */
 	msg.header.version = 1;
@@ -312,8 +341,18 @@ static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 	struct rcar_alsa_stream *s =
 		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
 		&d->rcar_pb_stream : &d->rcar_cap_stream;
+	struct dsp_dbg_stream *dbg;
 
 	pr_info("rcar_audio_fe: %s\n", __func__);
+
+	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? &d->dbg_playback : &d->dbg_capture;
+	mutex_lock(&dbg->lock);
+	dbg->cpu_addr = NULL;
+	dbg->dma_addr = 0;
+	dbg->bytes = 0;
+	dbg->period_bytes = 0;
+	dbg->valid = false;
+	mutex_unlock(&dbg->lock);
 
 	/* Free HW buffer */
 	dma_free_coherent(&pdev->dev, s->hw_buf_size, s->hw_cpu_addr,
@@ -535,6 +574,167 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 	snd_pcm_period_elapsed(sub);
 }
 
+static ssize_t rcar_audio_dbg_buf_read(struct file *file, char __user *ubuf,
+		size_t count, loff_t *ppos)
+{
+	struct dsp_dbg_stream *dbg = file->private_data;
+	void *snapshot;
+	size_t n;
+	ssize_t ret;
+
+	mutex_lock(&dbg->lock);
+	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes) {
+		mutex_unlock(&dbg->lock);
+		return -ENODATA;
+	}
+
+	n = dbg->bytes;
+	snapshot = kmemdup(dbg->cpu_addr, n, GFP_KERNEL);
+	mutex_unlock(&dbg->lock);
+
+	if (!snapshot) {
+		return -ENOMEM;
+	}
+
+	ret = simple_read_from_buffer(ubuf, count, ppos, snapshot, n);
+	kfree(snapshot);
+	return ret;
+}
+
+static ssize_t rcar_audio_dbg_buf_write(struct file *file,
+		const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct dsp_dbg_stream *dbg = file->private_data;
+	size_t avail, n;
+	void *tmp;
+	ssize_t ret;
+
+	mutex_lock(&dbg->lock);
+
+	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes) {
+		mutex_unlock(&dbg->lock);
+		return -ENODATA;
+	}
+
+	if (*ppos < 0 || *ppos >= dbg->bytes) {
+		mutex_unlock(&dbg->lock);
+		return -EINVAL;
+	}
+
+	avail = dbg->bytes - *ppos;
+	n = min(count, avail);
+
+	mutex_unlock(&dbg->lock);
+
+	tmp = memdup_user(ubuf, n);
+	if (IS_ERR(tmp))
+		return PTR_ERR(tmp);
+
+	mutex_lock(&dbg->lock);
+
+
+	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes ||
+			*ppos >= dbg->bytes) {
+		mutex_unlock(&dbg->lock);
+		kfree(tmp);
+		return -ENODATA;
+	}
+
+	avail = dbg->bytes - *ppos;
+	n = min(n, avail);
+
+	memcpy(dbg->cpu_addr + *ppos, tmp, n);
+
+	*ppos += n;
+	ret = n;
+
+	mutex_unlock(&dbg->lock);
+	kfree(tmp);
+	return ret;
+}
+
+static int rcar_audio_dbg_buf_open(struct inode *inode, struct file *file)
+{
+	file->private_data = inode->i_private;
+	return 0;
+}
+
+static const struct file_operations rcar_audio_dbg_buf_fops = {
+	.owner  = THIS_MODULE,
+	.open   = rcar_audio_dbg_buf_open,
+	.read   = rcar_audio_dbg_buf_read,
+	.write  = rcar_audio_dbg_buf_write,
+	.llseek = default_llseek,
+};
+
+static int rcar_audio_dbg_status_show(struct seq_file *m, void *p)
+{
+	struct dsp_dbg_stream *dbg = m->private;
+
+	mutex_lock(&dbg->lock);
+	seq_printf(m, "name=%s\n", dbg->name);
+	seq_printf(m, "valid=%u\n", dbg->valid ? 1 : 0);
+	seq_printf(m, "cpu_addr=%px\n", dbg->cpu_addr);
+	seq_printf(m, "dma_addr=%pad\n", &dbg->dma_addr);
+	seq_printf(m, "bytes=%zu\n", dbg->bytes);
+	seq_printf(m, "period_bytes=%zu\n", dbg->period_bytes);
+	mutex_unlock(&dbg->lock);
+
+	return 0;
+}
+
+static int rcar_audio_dbg_status_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, rcar_audio_dbg_status_show, inode->i_private);
+}
+
+static const struct file_operations rcar_audio_dbg_status_fops = {
+	.owner   = THIS_MODULE,
+	.open    = rcar_audio_dbg_status_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+static int rcar_audio_debugfs_init(struct rcar_alsa_priv *d)
+{
+	struct dentry *root;
+	char dir_name[15];
+
+	sprintf(dir_name, "audio_fe_g%d", d->group_id);
+	root = debugfs_create_dir(dir_name, NULL);
+	if (IS_ERR(root)) {
+		pr_err("rcar_audio_fe: %s: debugfs_create_dir err(%ld)\n",
+				__func__, PTR_ERR(root));
+		return PTR_ERR(root);
+	}
+	if (!root) {
+		pr_err("rcar_audio_fe: %s: debugfs_create_dir failed\n",
+				__func__);
+		return -ENODEV;
+	}
+
+	d->dbg_root = root;
+
+	debugfs_create_file("playback_status", 0400, root, &d->dbg_playback,
+			&rcar_audio_dbg_status_fops);
+	debugfs_create_file("capture_status", 0400, root, &d->dbg_capture,
+			&rcar_audio_dbg_status_fops);
+
+	debugfs_create_file("playback_buf", 0600, root, &d->dbg_playback,
+			&rcar_audio_dbg_buf_fops);
+	debugfs_create_file("capture_buf", 0600, root, &d->dbg_capture,
+			&rcar_audio_dbg_buf_fops);
+
+	return 0;
+}
+
+static void rcar_audio_debugfs_exit(struct rcar_alsa_priv *d)
+{
+	debugfs_remove_recursive(d->dbg_root);
+	d->dbg_root = NULL;
+}
+
 static int rcar_audio_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -608,6 +808,17 @@ static int rcar_audio_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/* for debugfs */
+	mutex_init(&d->dbg_playback.lock);
+	mutex_init(&d->dbg_capture.lock);
+	d->dbg_playback.name = "playback";
+	d->dbg_capture.name = "capture";
+
+	ret = rcar_audio_debugfs_init(d);
+	if (ret) {
+		dev_warn(&pdev->dev, "debugfs init failed: %d\n", ret);
+	}
+
 	dev_info(dev, "rcar_audio_fe: platform driver probed\n");
 	return 0;
 }
@@ -615,6 +826,8 @@ static int rcar_audio_probe(struct platform_device *pdev)
 static int rcar_audio_remove(struct platform_device *pdev)
 {
 	struct rcar_alsa_priv *d = platform_get_drvdata(pdev);
+
+	rcar_audio_debugfs_exit(d);
 
 	if (d && d->card) {
 		snd_card_free(d->card);
@@ -820,7 +1033,7 @@ static void rpmsg_audio_ctrl_remove(struct rpmsg_device *rpdev)
 		d->dsp_rpdev = NULL;
 	}
 
-	dev_info(&rpdev->dev, "rpmsg audio dsp driver is removed\n");
+	dev_info(&rpdev->dev, "rpmsg audio control driver is removed\n");
 }
 
 static struct rpmsg_device_id rpmsg_driver_audio_ctrl_id_table[] = {
