@@ -884,7 +884,7 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 	struct rcar_alsa_priv *d;
 	int ret;
 	int gid;
-	char *msg = "START";
+	struct rpmsg_packet msg;
 
 	gid = rpmsg_parse_gid(rpdev->id.name);
 	if (gid < 0) {
@@ -917,7 +917,10 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 		d->dsp_rpdev = rpdev;
 	}
 
-	ret = rpmsg_send(rpdev->ept, msg, strlen(msg));
+	/* send init mesage to remote core */
+	msg.header.version = DSP_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = RPMSG_INIT;
+	ret = rpmsg_send(rpdev->ept, &msg, sizeof(msg));
 	if (ret) {
 		dev_err(&rpdev->dev, "rpmsg_send failed: %d\n", ret);
 

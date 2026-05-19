@@ -8,6 +8,7 @@
 #define FRAME_PERIOD (4U)
 
 /* DSP Control Message type */
+#define RPMSG_INIT       0x3001     /* Init message from CA to remote core */
 #define CONFIG_REQ       0x2001     /* CA-DSP */
 #define PCM_START        0x2002     /* CA-DSP */
 #define PCM_PAUSE        0x2003     /* CA-DSP */
