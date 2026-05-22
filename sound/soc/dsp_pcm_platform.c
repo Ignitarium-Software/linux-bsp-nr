@@ -149,13 +149,13 @@ static int rcar_alsa_fe_pcm_open(struct snd_pcm_substream *sub)
 		SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER;
 	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE;
 	runtime->hw.rates = SNDRV_PCM_RATE_48000;
-	runtime->hw.rate_min = 48000;
-	runtime->hw.rate_max = 48000;
+	runtime->hw.rate_min = FRAME_RATE;
+	runtime->hw.rate_max = FRAME_RATE;
 	runtime->hw.channels_min = 2;
 	runtime->hw.channels_max = 2;
 	runtime->hw.buffer_bytes_max = BUFFER_LEN;
-	runtime->hw.period_bytes_min = 1024;
-	runtime->hw.period_bytes_max = 1024;
+	runtime->hw.period_bytes_min = PERIOD_BYTES;
+	runtime->hw.period_bytes_max = PERIOD_BYTES;
 	runtime->hw.periods_min = FRAME_PERIOD;
 	runtime->hw.periods_max = FRAME_PERIOD;
 
@@ -179,17 +179,17 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	struct dsp_status_msg dsp_status;
 	struct dsp_dbg_stream *dbg;
 
-	if (buffer_bytes != BUFFER_LEN) {
-		pr_err("rcar_audio_fe: %s error invalid buffer_bytes\n",
-				__func__);
+	if (buffer_bytes > BUFFER_LEN) {
+		pr_err("rcar_audio_fe: %s error invalid buffer_bytes(%lu)\n",
+				__func__, buffer_bytes);
 		return -EINVAL;
 	}
 
 	pr_info("audio_ctrl_rpmsg: %s PCM buffer_bytes=%zu PCM dma_addr=%pad\n",
 			__func__, buffer_bytes, &sub->dma_buffer.addr);
 
-	s->hw_buf_size = BUFFER_LEN;
-	s->hw_cpu_addr = dma_alloc_coherent(&pdev->dev, s->hw_buf_size,
+	s->hw_buf_size = buffer_bytes;
+	s->hw_cpu_addr = dma_alloc_coherent(&pdev->dev, BUFFER_LEN,
 			&s->hw_dma_handle, GFP_KERNEL);
 	if (!s->hw_cpu_addr) {
 		pr_err("rcar_audio_fe: %s dma_alloc_coherent failed\n",
@@ -220,10 +220,10 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	/* Payload */
 	msg.payload.dsp_config.dir =
 		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-	msg.payload.dsp_config.in_rate = 48000;
+	msg.payload.dsp_config.in_rate = FRAME_RATE;
 	msg.payload.dsp_config.in_channels = 2;
 	msg.payload.dsp_config.in_format = SNDRV_PCM_FMTBIT_S16_LE;
-	msg.payload.dsp_config.out_rate = 48000;
+	msg.payload.dsp_config.out_rate = FRAME_RATE;
 	msg.payload.dsp_config.out_channels = 2;
 	msg.payload.dsp_config.out_format = SNDRV_PCM_FMTBIT_S16_LE;
 	msg.payload.dsp_config.pcm_rb_phys =
@@ -232,7 +232,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	msg.payload.dsp_config.hw_rb_phys =
 		(uint64_t)dma_to_phys(&pdev->dev, s->hw_dma_handle);
 	msg.payload.dsp_config.hw_rb_size = (uint64_t)s->hw_buf_size;
-	msg.payload.dsp_config.period_frames = 256;
+	msg.payload.dsp_config.period_frames = PERIOD_FRAMES;
 	msg.payload.dsp_config.periods = FRAME_PERIOD;
 
 	rpmsg_send_dsp(msg, d);
