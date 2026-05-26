@@ -4,11 +4,12 @@
 #define __DSP_PCM_PLATFORM_H
 
 #define DSP_CTRL_RPMSG_VERSION (0x0U)
-#define BUFFER_LEN (30720U)         /* 30kB */
-#define FRAME_RATE (48000U)         /* 48kHz */
-#define PERIOD_FRAMES (240U)        /* 48kHz * 5ms => 240 frames */
-#define PERIOD_BYTES (960U)         /* 240 frames => 960 bytes*/
-#define FRAME_PERIOD (32U)          /* BUFFER_LEN / PERIOD_BYTES */
+
+#define PERIOD_MS        (5U)        /* 5ms => expected time for dsp to process 1 periodic frame*/
+#define BUFFER_LEN       (16384U)    /* 16kB */
+#define FRAME_RATE       (48000U)    /* 48kHz */
+#define PERIOD_FRAMES    (FRAME_RATE * PERIOD_MS / 1000)
+#define PERIOD_BYTES     (PERIOD_FRAMES * 4)
 
 /* DSP Control Message type */
 #define RPMSG_INIT       0x3001     /* Init message from CA to remote core */
