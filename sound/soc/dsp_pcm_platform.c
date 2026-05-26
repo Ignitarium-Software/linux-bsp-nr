@@ -45,6 +45,10 @@ struct dsp_dbg_stream {
 	size_t bytes;
 	size_t period_bytes;
 	bool valid;
+	bool rd_ready;
+	bool wr_ready;
+	size_t rd_off;
+	size_t wr_off;
 	const char *name;
 };
 
@@ -156,8 +160,8 @@ static int rcar_alsa_fe_pcm_open(struct snd_pcm_substream *sub)
 	runtime->hw.buffer_bytes_max = BUFFER_LEN;
 	runtime->hw.period_bytes_min = PERIOD_BYTES;
 	runtime->hw.period_bytes_max = PERIOD_BYTES;
-	runtime->hw.periods_min = FRAME_PERIOD;
-	runtime->hw.periods_max = FRAME_PERIOD;
+	runtime->hw.periods_min = 2;
+	runtime->hw.periods_max = (BUFFER_LEN / PERIOD_BYTES);
 
 	runtime->private_data = d;
 
@@ -189,7 +193,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 			__func__, buffer_bytes, &sub->dma_buffer.addr);
 
 	s->hw_buf_size = buffer_bytes;
-	s->hw_cpu_addr = dma_alloc_coherent(&pdev->dev, BUFFER_LEN,
+	s->hw_cpu_addr = dma_alloc_coherent(&pdev->dev, s->hw_buf_size,
 			&s->hw_dma_handle, GFP_KERNEL);
 	if (!s->hw_cpu_addr) {
 		pr_err("rcar_audio_fe: %s dma_alloc_coherent failed\n",
@@ -207,6 +211,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	dbg->bytes = s->hw_buf_size;
 	dbg->period_bytes = params_period_bytes(params);
 	dbg->valid = true;
+	dbg->wr_ready = true;
 	mutex_unlock(&dbg->lock);
 
 	/* header */
@@ -233,7 +238,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 		(uint64_t)dma_to_phys(&pdev->dev, s->hw_dma_handle);
 	msg.payload.dsp_config.hw_rb_size = (uint64_t)s->hw_buf_size;
 	msg.payload.dsp_config.period_frames = PERIOD_FRAMES;
-	msg.payload.dsp_config.periods = FRAME_PERIOD;
+	msg.payload.dsp_config.periods = (buffer_bytes / PERIOD_BYTES);
 
 	rpmsg_send_dsp(msg, d);
 
@@ -273,6 +278,7 @@ static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 	dbg->bytes = 0;
 	dbg->period_bytes = 0;
 	dbg->valid = false;
+	dbg->wr_ready = false;
 	mutex_unlock(&dbg->lock);
 
 	/* Free HW buffer */
@@ -468,6 +474,7 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 	struct snd_pcm_substream *sub;
 	struct snd_pcm_runtime *rt;
 	size_t *hw_ptr;
+	struct dsp_dbg_stream *dbg;
 
 	if (!d)
 		return;
@@ -475,9 +482,11 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 	if (stream_dir == SNDRV_PCM_STREAM_PLAYBACK) {
 		sub = d->pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
 		hw_ptr = &d->rcar_pb_stream.hw_ptr_bytes;
+		dbg = &d->dbg_playback;
 	} else {
 		sub = d->pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
 		hw_ptr = &d->rcar_cap_stream.hw_ptr_bytes;
+		dbg = &d->dbg_capture;
 	}
 
 	if (!sub || !sub->runtime)
@@ -485,11 +494,17 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 
 	rt = sub->runtime;
 
+	dbg->rd_off = *hw_ptr;
+	dbg->rd_ready = true;
+
 	/* Advance hardware pointer */
 	*hw_ptr += frames_to_bytes(rt, rt->period_size);
 
 	if (*hw_ptr >= frames_to_bytes(rt, rt->buffer_size))
 		*hw_ptr = 0;
+
+	dbg->wr_off = *hw_ptr;
+	dbg->wr_ready = true;
 
 	/* Tell ALSA a period elapsed */
 	snd_pcm_period_elapsed(sub);
@@ -504,19 +519,22 @@ static ssize_t rcar_audio_dbg_buf_read(struct file *file, char __user *ubuf,
 	ssize_t ret;
 
 	mutex_lock(&dbg->lock);
-	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes) {
+	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes || !dbg->rd_ready) {
 		mutex_unlock(&dbg->lock);
 		return -ENODATA;
 	}
 
-	n = dbg->bytes;
-	snapshot = kmemdup(dbg->cpu_addr, n, GFP_KERNEL);
+	n = PERIOD_BYTES;
+	snapshot = kmemdup(dbg->cpu_addr + dbg->rd_off, n, GFP_KERNEL);
+	dbg->rd_ready = false;
 	mutex_unlock(&dbg->lock);
 
 	if (!snapshot) {
 		return -ENOMEM;
 	}
 
+	*ppos = 0;
+	count = PERIOD_BYTES;
 	ret = simple_read_from_buffer(ubuf, count, ppos, snapshot, n);
 	kfree(snapshot);
 	return ret;
@@ -532,18 +550,17 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 
 	mutex_lock(&dbg->lock);
 
-	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes) {
+	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes || !dbg->wr_ready) {
 		mutex_unlock(&dbg->lock);
 		return -ENODATA;
 	}
 
-	if (*ppos < 0 || *ppos >= dbg->bytes) {
+	if (*ppos < 0 || *ppos >= PERIOD_BYTES) {
 		mutex_unlock(&dbg->lock);
 		return -EINVAL;
 	}
 
-	avail = dbg->bytes - *ppos;
-	n = min(count, avail);
+	n = PERIOD_BYTES;
 
 	mutex_unlock(&dbg->lock);
 
@@ -553,22 +570,12 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 
 	mutex_lock(&dbg->lock);
 
-
-	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes ||
-			*ppos >= dbg->bytes) {
-		mutex_unlock(&dbg->lock);
-		kfree(tmp);
-		return -ENODATA;
-	}
-
-	avail = dbg->bytes - *ppos;
-	n = min(n, avail);
-
-	memcpy(dbg->cpu_addr + *ppos, tmp, n);
+	memcpy(dbg->cpu_addr + dbg->wr_off, tmp, n);
 
 	*ppos += n;
 	ret = n;
 
+	dbg->wr_ready = false;
 	mutex_unlock(&dbg->lock);
 	kfree(tmp);
 	return ret;
