@@ -544,9 +544,7 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 		const char __user *ubuf, size_t count, loff_t *ppos)
 {
 	struct dsp_dbg_stream *dbg = file->private_data;
-	size_t avail, n;
 	void *tmp;
-	ssize_t ret;
 
 	mutex_lock(&dbg->lock);
 
@@ -555,30 +553,21 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 		return -ENODATA;
 	}
 
-	if (*ppos < 0 || *ppos >= PERIOD_BYTES) {
-		mutex_unlock(&dbg->lock);
-		return -EINVAL;
-	}
-
-	n = PERIOD_BYTES;
-
 	mutex_unlock(&dbg->lock);
 
-	tmp = memdup_user(ubuf, n);
+	tmp = memdup_user(ubuf, PERIOD_BYTES);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
 
 	mutex_lock(&dbg->lock);
 
-	memcpy(dbg->cpu_addr + dbg->wr_off, tmp, n);
-
-	*ppos += n;
-	ret = n;
-
+	memcpy(dbg->cpu_addr + dbg->wr_off, tmp, PERIOD_BYTES);
+	*ppos = 0;
 	dbg->wr_ready = false;
 	mutex_unlock(&dbg->lock);
+
 	kfree(tmp);
-	return ret;
+	return PERIOD_BYTES;
 }
 
 static int rcar_audio_dbg_buf_open(struct inode *inode, struct file *file)
