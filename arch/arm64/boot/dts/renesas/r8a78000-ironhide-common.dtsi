@@ -443,6 +443,16 @@
 	status = "okay";
 };
 
+&audio_fe_g0 {
+	memory-region = <&pcm_g0>;
+	status = "okay";
+};
+
+&audio_fe_g1 {
+	memory-region = <&pcm_g1>;
+	status = "okay";
+};
+
 &cmt0 {
 	status = "okay";
 };
