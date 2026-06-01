@@ -51,6 +51,16 @@ config SND_SOC_RZ
 	help
 	  This option enables RZ/G2L SSIF-2 sound support.
 
+config SND_SOC_X5H_AUDIO
+	tristate "X5H Gen5 Audio Pipeline support"
+	depends on COMMON_CLK
+	depends on OF || COMPILE_TEST
+	select REGMAP_MMIO
+	help
+	  This option enables the simplified X5H Gen5 audio pipeline
+	  driver with static compile-time configuration for the full
+	  SCU chain (SSI+SRC+CTU+MIX+DVC).
+
 ##
 ## Boards
 ##

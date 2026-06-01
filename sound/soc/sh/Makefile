@@ -26,3 +26,6 @@ obj-$(CONFIG_SND_SIU_MIGOR)	+= snd-soc-migor.o
 # RZ/G2L
 snd-soc-rz-ssi-objs		:= rz-ssi.o
 obj-$(CONFIG_SND_SOC_RZ)	+= snd-soc-rz-ssi.o
+
+# X5H Gen5 Audio Pipeline
+obj-$(CONFIG_SND_SOC_X5H_AUDIO)	+= x5h_pipeline/
