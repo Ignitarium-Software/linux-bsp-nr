@@ -152,25 +152,25 @@
 
 		pcm_g0: pcm-g0@bfc00000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc00000 0x0 0x20000>;
+			reg = <0x0 0xbfc00000 0x0 0x10000>;
+			no-map;
+		};
+
+		pcm_g0_cr: pcm-g0-cr@bfc10000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbfc10000 0x0 0x10000>;
 			no-map;
 		};
 
 		pcm_g1: pcm-g1@bfc20000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc20000 0x0 0x20000>;
+			reg = <0x0 0xbfc20000 0x0 0x10000>;
 			no-map;
 		};
 
-		pcm_g2: pcm-g2@bfc40000 {
+		pcm_g1_cr: pcm-g1-cr@bfc30000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc40000 0x0 0x20000>;
-			no-map;
-		};
-
-		pcm_g3: pcm-g3@bfc60000 {
-			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc60000 0x0 0x20000>;
+			reg = <0x0 0xbfc30000 0x0 0x10000>;
 			no-map;
 		};
 
@@ -445,11 +445,7 @@
 
 &audio_fe_g0 {
 	memory-region = <&pcm_g0>;
-	status = "okay";
-};
-
-&audio_fe_g1 {
-	memory-region = <&pcm_g1>;
+	cr-rb-region = <&pcm_g0_cr>;
 	status = "okay";
 };
 
