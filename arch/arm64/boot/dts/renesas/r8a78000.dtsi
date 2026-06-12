@@ -5296,22 +5296,6 @@
 			status = "disabled";
 		};
 
-		audio_fe_g2: audio-fe@2 {
-			compatible = "renesas,rcar_audio_fe";
-			rcar,group-id = <2>;
-			rcar,rpmsg-cr-chan = "audio_cr_ctrl_g2";
-			rcar,rpmsg-dsp-chan = "audio_dsp_ctrl_g2";
-			status = "disabled";
-		};
-
-		audio_fe_g3: audio-fe@3 {
-			compatible = "renesas,rcar_audio_fe";
-			rcar,group-id = <3>;
-			rcar,rpmsg-cr-chan = "audio_cr_ctrl_g3";
-			rcar,rpmsg-dsp-chan = "audio_dsp_ctrl_g3";
-			status = "disabled";
-		};
-
 		mmc0: mmc@c0880000 {
 			compatible = "renesas,rcar-gen5-sdhi";
 			reg = <0 0xc0880000 0 0x2000>;
