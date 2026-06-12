@@ -26,14 +26,16 @@
 
 #include <sound/dsp_pcm_platform.h>
 
-#define MAX_DEVICES (4U)            /* Maximum number of ALSA instances */
+#define MAX_DEVICES (2U)            /* Maximum number of ALSA instances */
 #define DSP_RESP_TIMEOUT_MS (100U)
+#define CR_RESP_TIMEOUT_MS (100U)
 
 /* Per-stream state */
 struct rcar_alsa_stream {
 	size_t hw_ptr_bytes;
 	size_t hw_buf_size;
 	dma_addr_t hw_dma_handle;
+	uint64_t hw_phy_addr;
 	void *hw_cpu_addr;
 };
 
@@ -41,7 +43,7 @@ struct rcar_alsa_stream {
 struct dsp_dbg_stream {
 	struct mutex lock;
 	void *cpu_addr;
-	dma_addr_t dma_addr;
+	uint64_t phy_addr;
 	size_t bytes;
 	size_t period_bytes;
 	bool valid;
@@ -74,8 +76,14 @@ struct rcar_alsa_priv {
 	struct workqueue_struct *rpmsg_wq_cr;
 	struct workqueue_struct *rpmsg_wq_dsp;
 
+	volatile bool cr_reply_flag;
+	volatile struct rpmsg_packet cr_reply_msg;
+
 	volatile bool dsp_reply_flag;
 	volatile struct rpmsg_packet dsp_reply_msg;
+
+	wait_queue_head_t cr_wait_q;
+	spinlock_t cr_status_lock;
 
 	wait_queue_head_t dsp_wait_q;
 	spinlock_t dsp_status_lock;
@@ -86,13 +94,24 @@ struct rcar_alsa_priv {
 	struct dsp_dbg_stream dbg_capture;
 };
 
-struct rpmsg_work_dsp {
+struct rpmsg_work {
 	struct work_struct work;
 	struct rpmsg_packet msg;
 	struct rcar_alsa_priv *priv;
 };
 
 struct rcar_alsa_priv *global_alsa_priv[MAX_DEVICES];
+
+static int rpmsg_send_cr(struct rpmsg_packet msg, struct rcar_alsa_priv *d)
+{
+	if (!d->cr_rpdev) {
+		pr_err("rcar_audio_fe: %s failed: No rpmsg_device available\n",
+				__func__);
+		return -ENODEV;
+	}
+
+	return rpmsg_send(d->cr_rpdev->ept, &msg, sizeof(msg));
+}
 
 static int rpmsg_send_dsp(struct rpmsg_packet msg, struct rcar_alsa_priv *d)
 {
@@ -103,6 +122,43 @@ static int rpmsg_send_dsp(struct rpmsg_packet msg, struct rcar_alsa_priv *d)
 	}
 
 	return rpmsg_send(d->dsp_rpdev->ept, &msg, sizeof(msg));
+}
+
+static int rpmsg_recv_cr_blocking(int *msg_type, struct open_resp_msg *response,
+		unsigned int timeout_ms, struct rcar_alsa_priv *d)
+{
+	long ret;
+	unsigned long flags;
+
+	ret = wait_event_interruptible_timeout(d->cr_wait_q,
+			READ_ONCE(d->cr_reply_flag),
+			msecs_to_jiffies(timeout_ms));
+
+	if (ret == 0) {
+		pr_err("%s: timeout\n", __func__);
+		return -ETIMEDOUT;
+	}
+
+	if (ret < 0) {
+		pr_err("%s: error(%ld)\n", __func__, ret);
+		return ret;
+	}
+
+	pr_info("%s: got response after %dms, timeout %dms\n", __func__,
+			(timeout_ms - jiffies_to_msecs(ret)), timeout_ms);
+
+	spin_lock_irqsave(&d->cr_status_lock, flags);
+	if (!d->cr_reply_flag) {
+		spin_unlock_irqrestore(&d->cr_status_lock, flags);
+		return -EAGAIN;
+	}
+
+	*response = d->cr_reply_msg.payload.open_resp;
+	*msg_type = d->cr_reply_msg.header.msg_type;
+	d->cr_reply_flag = false;
+	spin_unlock_irqrestore(&d->cr_status_lock, flags);
+
+	return 0;
 }
 
 static int rpmsg_recv_dsp_blocking(int *msg_type, struct dsp_status_msg *status,
@@ -181,6 +237,7 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	int type;
 	int ret;
 	struct dsp_status_msg dsp_status;
+	struct open_resp_msg cr_response;
 	struct dsp_dbg_stream *dbg;
 
 	if (buffer_bytes > BUFFER_LEN) {
@@ -189,40 +246,84 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 		return -EINVAL;
 	}
 
-	pr_info("audio_ctrl_rpmsg: %s PCM buffer_bytes=%zu PCM dma_addr=%pad\n",
-			__func__, buffer_bytes, &sub->dma_buffer.addr);
+	/* CR msg header*/
+	msg.header.version = DSP_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = OPEN_REQ;
+	msg.header.msg_id = 1;
+	msg.header.stream_id =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
+	msg.header.payload_len = sizeof(struct open_req_msg);
 
-	s->hw_buf_size = buffer_bytes;
-	s->hw_cpu_addr = dma_alloc_coherent(&pdev->dev, s->hw_buf_size,
-			&s->hw_dma_handle, GFP_KERNEL);
+	/* CR msg Payload */
+	msg.payload.open_req.dir =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
+	msg.payload.open_req.rate = FRAME_RATE;
+	msg.payload.open_req.channels = 2;
+	msg.payload.open_req.format = SNDRV_PCM_FMTBIT_S16_LE;
+	msg.payload.open_req.period_frames = PERIOD_FRAMES;
+	msg.payload.open_req.periods = (buffer_bytes / PERIOD_BYTES);
+	msg.payload.open_req.pcm_rb_phys =
+		(uint64_t)dma_to_phys(&pdev->dev, sub->dma_buffer.addr);
+	msg.payload.open_req.pcm_rb_size = (uint64_t)buffer_bytes;
+
+	ret = rpmsg_send_cr(msg, d);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Wait for response from CR */
+	ret = rpmsg_recv_cr_blocking(&type, &cr_response,
+			CR_RESP_TIMEOUT_MS, d);
+	if (ret) {
+		pr_err("rcar_audio_fe: %s: no response from CR ret(%d)\n",
+				__func__, ret);
+		return ret;
+	}
+
+	if (type != OPEN_RESP) {
+		pr_err("rcar_audio_fe: %s: err response from CR, type(0x%x)\n",
+				__func__, type);
+		return -EAGAIN;
+	}
+
+	if (cr_response.status) {
+		pr_err("rcar_audio_fe: %s: err status from CR, type(0x%x)\n",
+				__func__, cr_response.status);
+		return -EAGAIN;
+	}
+
+	if (!cr_response.hw_rb_phys || !cr_response.hw_rb_phys) {
+		pr_err("rcar_audio_fe: %s: Bad address / size for rb\n",
+				__func__);
+		return -EAGAIN;
+	}
+
+	s->hw_phy_addr = cr_response.hw_rb_phys;
+	s->hw_buf_size = cr_response.hw_rb_size;
+
+	s->hw_cpu_addr = ioremap(s->hw_phy_addr, s->hw_buf_size);
 	if (!s->hw_cpu_addr) {
-		pr_err("rcar_audio_fe: %s dma_alloc_coherent failed\n",
+		pr_err("rcar_audio_fe: %s ioremap failed\n",
 				__func__);
 		return -ENOMEM;
 	}
 
-	pr_info("audio_ctrl_rpmsg: %s HW buffer_bytes=%zu HW dma_addr=%pad\n",
-			__func__, s->hw_buf_size, &s->hw_dma_handle);
-
-	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? &d->dbg_playback : &d->dbg_capture;
+	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		&d->dbg_playback : &d->dbg_capture;
 	mutex_lock(&dbg->lock);
 	dbg->cpu_addr = s->hw_cpu_addr;
-	dbg->dma_addr = s->hw_dma_handle;
+	dbg->phy_addr = s->hw_phy_addr;
 	dbg->bytes = s->hw_buf_size;
 	dbg->period_bytes = params_period_bytes(params);
 	dbg->valid = true;
 	dbg->wr_ready = true;
 	mutex_unlock(&dbg->lock);
 
-	/* header */
-	msg.header.version = DSP_CTRL_RPMSG_VERSION;
+	/* DSP msg header*/
 	msg.header.msg_type = CONFIG_REQ;
-	msg.header.msg_id = 1;
-	msg.header.stream_id =
-		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
 	msg.header.payload_len = sizeof(struct dsp_config_req_msg);
 
-	/* Payload */
+	/* DSP msg Payload */
 	msg.payload.dsp_config.dir =
 		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
 	msg.payload.dsp_config.in_rate = FRAME_RATE;
@@ -234,13 +335,15 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	msg.payload.dsp_config.pcm_rb_phys =
 		(uint64_t)dma_to_phys(&pdev->dev, sub->dma_buffer.addr);
 	msg.payload.dsp_config.pcm_rb_size = (uint64_t)buffer_bytes;
-	msg.payload.dsp_config.hw_rb_phys =
-		(uint64_t)dma_to_phys(&pdev->dev, s->hw_dma_handle);
+	msg.payload.dsp_config.hw_rb_phys = s->hw_phy_addr;
 	msg.payload.dsp_config.hw_rb_size = (uint64_t)s->hw_buf_size;
 	msg.payload.dsp_config.period_frames = PERIOD_FRAMES;
 	msg.payload.dsp_config.periods = (buffer_bytes / PERIOD_BYTES);
 
-	rpmsg_send_dsp(msg, d);
+	ret = rpmsg_send_dsp(msg, d);
+	if (ret < 0) {
+		return ret;
+	}
 
 	/* Wait for response from DSP */
 	ret = rpmsg_recv_dsp_blocking(&type, &dsp_status,
@@ -263,7 +366,6 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 {
 	struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
-	struct platform_device *pdev = d->pdev;
 	struct rcar_alsa_stream *s =
 		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
 		&d->rcar_pb_stream : &d->rcar_cap_stream;
@@ -271,10 +373,11 @@ static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 
 	pr_info("rcar_audio_fe: %s\n", __func__);
 
-	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? &d->dbg_playback : &d->dbg_capture;
+	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		&d->dbg_playback : &d->dbg_capture;
 	mutex_lock(&dbg->lock);
 	dbg->cpu_addr = NULL;
-	dbg->dma_addr = 0;
+	dbg->phy_addr = 0;
 	dbg->bytes = 0;
 	dbg->period_bytes = 0;
 	dbg->valid = false;
@@ -282,8 +385,7 @@ static int rcar_audio_fe_pcm_hw_free(struct snd_pcm_substream *sub)
 	mutex_unlock(&dbg->lock);
 
 	/* Free HW buffer */
-	dma_free_coherent(&pdev->dev, s->hw_buf_size, s->hw_cpu_addr,
-			s->hw_dma_handle);
+	iounmap(s->hw_cpu_addr);
 	s->hw_cpu_addr = NULL;
 
 	return 0;
@@ -592,7 +694,7 @@ static int rcar_audio_dbg_status_show(struct seq_file *m, void *p)
 	seq_printf(m, "name=%s\n", dbg->name);
 	seq_printf(m, "valid=%u\n", dbg->valid ? 1 : 0);
 	seq_printf(m, "cpu_addr=%px\n", dbg->cpu_addr);
-	seq_printf(m, "dma_addr=%pad\n", &dbg->dma_addr);
+	seq_printf(m, "phy_addr=%px\n", dbg->phy_addr);
 	seq_printf(m, "bytes=%zu\n", dbg->bytes);
 	seq_printf(m, "period_bytes=%zu\n", dbg->period_bytes);
 	mutex_unlock(&dbg->lock);
@@ -795,10 +897,48 @@ static bool rpmsg_is_cr(char *name, struct rcar_alsa_priv *d) {
 	return !strncmp(d->cr_chan, name, strlen(name));
 }
 
+static void rpmsg_cr_handle(struct work_struct *work)
+{
+	struct rpmsg_work *w =
+		container_of(work, struct rpmsg_work, work);
+	struct rcar_alsa_priv *d = w->priv;
+	struct rpmsg_packet *msg = &w->msg;
+	unsigned long flags;
+	bool drop_msg = false;
+
+	switch(msg->header.msg_type) {
+	case OPEN_RESP:
+		spin_lock_irqsave(&d->cr_status_lock, flags);
+		if (d->cr_reply_flag) {
+			/* drop unhandled previous message */
+			drop_msg = true;
+		}
+
+		d->cr_reply_flag = true;
+		d->cr_reply_msg = *msg;
+		spin_unlock_irqrestore(&d->cr_status_lock, flags);
+		wake_up_interruptible(&d->cr_wait_q);
+
+		if (drop_msg) {
+			pr_warn("audio_ctrl_rpmsg: %s: "
+					"Discarding unused previous message\n",
+					__func__);
+			drop_msg = false;
+		}
+		break;
+
+	default:
+		pr_warn("audio_ctrl_rpmsg: unknown dsp message type %u\n",
+				msg->header.msg_type);
+		break;
+	}
+	kfree(w);
+}
+
 static void rpmsg_dsp_handle(struct work_struct *work)
 {
-	struct rpmsg_work_dsp *w =
-		container_of(work, struct rpmsg_work_dsp, work);
+	struct rpmsg_work *w =
+		container_of(work, struct rpmsg_work, work);
 	struct rcar_alsa_priv *d = w->priv;
 	struct rpmsg_packet *msg = &w->msg;
 	unsigned long flags;
@@ -843,7 +983,7 @@ static int rpmsg_audio_ctrl_cb(struct rpmsg_device *rpdev, void *data, int len,
 {
 	struct rcar_alsa_priv *d = dev_get_drvdata(&rpdev->dev);
 	struct rpmsg_packet *msg = data;
-	struct rpmsg_work_dsp *w;
+	struct rpmsg_work *w;
 
 	if (len < sizeof(struct rpmsg_hdr)) {
 		pr_err("audio_ctrl_rpmsg: %s failed: "
@@ -852,10 +992,26 @@ static int rpmsg_audio_ctrl_cb(struct rpmsg_device *rpdev, void *data, int len,
 	}
 
 	if (rpmsg_is_cr(rpdev->id.name, d)) {
-		/* Implement later */
+		if (d->rpmsg_wq_cr) {
+			w = kmalloc(sizeof(struct rpmsg_work), GFP_ATOMIC);
+			if (w) {
+				INIT_WORK(&w->work, rpmsg_cr_handle);
+				w->msg = *msg;
+				w->priv = d;
+				queue_work(d->rpmsg_wq_cr, &w->work);
+			} else {
+				pr_err("audio_ctrl_rpmsg: %s: kmalloc failed\n",
+						__func__);
+				return -ENOMEM;
+			}
+		} else {
+			pr_err("audio_ctrl_rpmsg: %s: No workqueue\n",
+					__func__);
+			return -EINVAL;
+		}
 	} else {
 		if (d->rpmsg_wq_dsp) {
-			w = kmalloc(sizeof(struct rpmsg_work_dsp), GFP_ATOMIC);
+			w = kmalloc(sizeof(struct rpmsg_work), GFP_ATOMIC);
 			if (w) {
 				INIT_WORK(&w->work, rpmsg_dsp_handle);
 				w->msg = *msg;
@@ -881,6 +1037,7 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 	int ret;
 	int gid;
 	struct rpmsg_packet msg;
+	bool is_cr = false;
 
 	gid = rpmsg_parse_gid(rpdev->id.name);
 	if (gid < 0) {
@@ -898,7 +1055,17 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 	d = global_alsa_priv[gid];
 	dev_set_drvdata(&rpdev->dev, d);
 
-	if (rpmsg_is_cr(rpdev->id.name, d)) {
+	is_cr = rpmsg_is_cr(rpdev->id.name, d);
+	if (is_cr) {
+		d->rpmsg_wq_cr =
+			create_singlethread_workqueue("rpmsg_cr_workqueue");
+		if (!d->rpmsg_wq_cr) {
+			dev_err(&rpdev->dev,
+				"create_singlethread_workqueue for cr failed\n"
+				);
+			return -EPROTO;
+		}
+
 		d->cr_rpdev = rpdev;
 	} else {
 		d->rpmsg_wq_dsp =
@@ -914,13 +1081,14 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 	}
 
 	/* send init mesage to remote core */
-	msg.header.version = DSP_CTRL_RPMSG_VERSION;
+	msg.header.version = is_cr ?
+		CR_CTRL_RPMSG_VERSION : DSP_CTRL_RPMSG_VERSION;
 	msg.header.msg_type = RPMSG_INIT;
 	ret = rpmsg_send(rpdev->ept, &msg, sizeof(msg));
 	if (ret) {
 		dev_err(&rpdev->dev, "rpmsg_send failed: %d\n", ret);
 
-		if (rpmsg_is_cr(rpdev->id.name, d)) {
+		if (is_cr) {
 			d->cr_rpdev = NULL;
 		} else {
 			d->dsp_rpdev = NULL;
@@ -929,12 +1097,18 @@ static int rpmsg_audio_ctrl_probe(struct rpmsg_device *rpdev)
 		return ret;
 	}
 
-	init_waitqueue_head(&d->dsp_wait_q);
-	spin_lock_init(&d->dsp_status_lock);
-	d->dsp_reply_flag = false;
+	if (is_cr) {
+		init_waitqueue_head(&d->cr_wait_q);
+		spin_lock_init(&d->cr_status_lock);
+		d->cr_reply_flag = false;
+	} else {
+		init_waitqueue_head(&d->dsp_wait_q);
+		spin_lock_init(&d->dsp_status_lock);
+		d->dsp_reply_flag = false;
+	}
 
-	dev_info(&rpdev->dev, "rpmsg audio dsp new channel: 0x%x -> 0x%x!\n",
-			rpdev->src, rpdev->dst);
+	dev_info(&rpdev->dev, "rpmsg audio %s new channel: 0x%x -> 0x%x!\n",
+			(is_cr ? "cr" : "dsp"), rpdev->src, rpdev->dst);
 
 	return 0;
 }
@@ -944,6 +1118,10 @@ static void rpmsg_audio_ctrl_remove(struct rpmsg_device *rpdev)
 	struct rcar_alsa_priv *d = dev_get_drvdata(&rpdev->dev);
 
 	if (rpmsg_is_cr(rpdev->id.name, d)) {
+		/* delete cr workqueue */
+		flush_workqueue(d->rpmsg_wq_cr);
+		destroy_workqueue(d->rpmsg_wq_cr);
+
 		d->cr_rpdev = NULL;
 	} else {
 		/* delete dsp workqueue */
@@ -961,10 +1139,6 @@ static struct rpmsg_device_id rpmsg_driver_audio_ctrl_id_table[] = {
 	{ .name	= "audio_dsp_ctrl_g0" },
 	{ .name	= "audio_cr_ctrl_g1" },
 	{ .name	= "audio_dsp_ctrl_g1" },
-	{ .name	= "audio_cr_ctrl_g2" },
-	{ .name	= "audio_dsp_ctrl_g2" },
-	{ .name	= "audio_cr_ctrl_g3" },
-	{ .name	= "audio_dsp_ctrl_g3" },
 	{ },
 };
 MODULE_DEVICE_TABLE(rpmsg, rpmsg_driver_audio_ctrl_id_table);
