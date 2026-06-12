@@ -5280,6 +5280,16 @@
 			status = "disabled";
 		};
 
+		dsp_rproc0: dsp_0 {
+			compatible = "renesas,rcar-dsp-rproc";
+			reg = <0x0 0xcbe80000 0x0 0x10000>;
+			reg-names = "ch0";
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 703 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "ch0";
+			status = "disabled";
+		};
+
 		audio_fe_g0: audio-fe@0 {
 			compatible = "renesas,rcar_audio_fe";
 			rcar,group-id = <0>;

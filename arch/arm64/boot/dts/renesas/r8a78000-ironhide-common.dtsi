@@ -146,8 +146,29 @@
 		linux,cma@a2600000 {
 			compatible = "shared-dma-pool";
 			reusable;
-			reg = <0x0 0xa2600000 0x0 0x1d600000>;
+			reg = <0x0 0xa2600000 0x0 0x1c200000>;
 			linux,cma-default;
+		};
+
+		dsp_ram: dsp-ram@be800000 {
+			reg = <0x0 0xbe800000 0x0 0xd5000>;
+			no-map;
+		};
+
+		dsp_carv: dsp-carv@be8d5000 {
+			reg = <0x0 0xbe8d5000 0x0 0x1000>;
+			no-map;
+		};
+
+		dsp_vring: dsp-vring@be8d6000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xbe8d6000 0x0 0x280000>;
+			no-map;
+		};
+
+		dsp_log: dsp-log@be8fe000 {
+			reg = <0x0 0xbe8fe000 0x0 0x2000>;
+			no-map;
 		};
 
 		pcm_g0: pcm-g0@bfc00000 {
@@ -440,6 +461,12 @@
 
 &cr52_rproc0 {
 	memory-region = <&cr52_ram0>;
+	status = "okay";
+};
+
+&dsp_rproc0 {
+	carveout-region = <&dsp_carv>;
+	memory-region = <&dsp_vring>;
 	status = "okay";
 };
 
