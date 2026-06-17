@@ -151,47 +151,47 @@
 		};
 
 		dsp_ram: dsp-ram@be800000 {
-			reg = <0x0 0xbe800000 0x0 0xd5000>;
+			reg = <0x0 0xbe800000 0x0 0x100000>;
+			no-map;
+		};
+ 
+		dsp_carv: dsp-carv@bfefd000 {
+			reg = <0x0 0xbfefd000 0x0 0x1000>;
+			no-map;
+		};
+ 
+		dsp_log: dsp-log@bfefe000 {
+			reg = <0x0 0xbfefe000 0x0 0x2000>;
 			no-map;
 		};
 
-		dsp_carv: dsp-carv@be8d5000 {
-			reg = <0x0 0xbe8d5000 0x0 0x1000>;
-			no-map;
-		};
-
-		dsp_vring: dsp-vring@be8d6000 {
+		dsp_vring: dsp-vring@bff00000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbe8d6000 0x0 0x280000>;
+			reg = <0x0 0xbff00000 0x0 0xc0000>;
 			no-map;
 		};
 
-		dsp_log: dsp-log@be8fe000 {
-			reg = <0x0 0xbe8fe000 0x0 0x2000>;
-			no-map;
-		};
-
-		pcm_g0: pcm-g0@bfc00000 {
+		pcm_g0: pcm-g0@bffc0000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc00000 0x0 0x10000>;
+			reg = <0x0 0xbffc0000 0x0 0x10000>;
 			no-map;
 		};
 
-		pcm_g0_cr: pcm-g0-cr@bfc10000 {
+		pcm_g0_cr: pcm-g0-cr@bffd0000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc10000 0x0 0x10000>;
+			reg = <0x0 0xbffd0000 0x0 0x10000>;
 			no-map;
 		};
 
-		pcm_g1: pcm-g1@bfc20000 {
+		pcm_g1: pcm-g1@bffe0000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc20000 0x0 0x10000>;
+			reg = <0x0 0xbffe0000 0x0 0x10000>;
 			no-map;
 		};
 
-		pcm_g1_cr: pcm-g1-cr@bfc30000 {
+		pcm_g1_cr: pcm-g1-cr@bfff0000 {
 			compatible = "shared-dma-pool";
-			reg = <0x0 0xbfc30000 0x0 0x10000>;
+			reg = <0x0 0xbfff0000 0x0 0x10000>;
 			no-map;
 		};
 
