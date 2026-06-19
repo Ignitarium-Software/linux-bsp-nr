@@ -154,12 +154,12 @@
 			reg = <0x0 0xbe800000 0x0 0x100000>;
 			no-map;
 		};
- 
+
 		dsp_carv: dsp-carv@bfefd000 {
 			reg = <0x0 0xbfefd000 0x0 0x1000>;
 			no-map;
 		};
- 
+
 		dsp_log: dsp-log@bfefe000 {
 			reg = <0x0 0xbfefe000 0x0 0x2000>;
 			no-map;
