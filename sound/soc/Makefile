@@ -31,7 +31,7 @@ endif
 
 obj-$(CONFIG_SND_SOC_ACPI) += snd-soc-acpi.o
 
-obj-$(CONFIG_SND_SOC_DSP_PCM_PLATFORM) += dsp_pcm_platform.o
+obj-$(CONFIG_SND_SOC_DSP_PCM_PLATFORM) += rcar_alsa_fe.o
 
 obj-$(CONFIG_SND_SOC)	+= snd-soc-core.o
 obj-$(CONFIG_SND_SOC)	+= codecs/
