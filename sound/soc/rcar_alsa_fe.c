@@ -24,7 +24,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
-#include <sound/dsp_pcm_platform.h>
+#include <sound/rcar_alsa_fe.h>
 
 #define MAX_DEVICES (2U)            /* Maximum number of ALSA instances */
 #define DSP_RESP_TIMEOUT_MS (100U)
@@ -882,7 +882,7 @@ static const struct of_device_id rcar_audio_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, rcar_audio_of_match);
 
-static struct platform_driver dsp_pcm_driver = {
+static struct platform_driver rcar_alsa_fe = {
 	.probe = rcar_audio_probe,
 	.remove = rcar_audio_remove,
 	.driver = {
@@ -890,7 +890,7 @@ static struct platform_driver dsp_pcm_driver = {
 		.of_match_table = rcar_audio_of_match,
 	},
 };
-module_platform_driver(dsp_pcm_driver);
+module_platform_driver(rcar_alsa_fe);
 
 static int rpmsg_parse_gid(char *name)
 {
