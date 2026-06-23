@@ -323,3 +323,4 @@ module_platform_driver(rcar_dsp_rproc_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Renesas R-Car DSP remote processor control driver");
+MODULE_AUTHOR("Jibin George");
