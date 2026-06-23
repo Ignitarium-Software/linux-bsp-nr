@@ -2,7 +2,7 @@
 /*
  * Device Tree Source for the R-Car X5H (R8A78000) SoC
  *
- * Copyright (C) 2025 Renesas Electronics Corp.
+ * Copyright (C) 2025-2026 Renesas Electronics Corp.
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>

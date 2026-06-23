@@ -1,4 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2026 Renesas Electronics Corporation
+ */
 
 #ifndef __DSP_PCM_PLATFORM_H
 #define __DSP_PCM_PLATFORM_H

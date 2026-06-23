@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2026 Renesas Electronics Corporation
+ */
+
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
@@ -1170,3 +1175,5 @@ static struct rpmsg_driver rpmsg_audio_ctrl = {
 module_rpmsg_driver(rpmsg_audio_ctrl);
 
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Renesas R-Car ALSA audio control driver");
+MODULE_AUTHOR("Jibin George");
