@@ -8,6 +8,7 @@
 /dts-v1/;
 #include "r8a78000.dtsi"
 #include "r8a78000-ironhide-common.dtsi"
+#include "r8a78000-ironhide-audio.dtsi"
 
 / {
 	model = "Renesas Ironhide board based on r8a78000";
