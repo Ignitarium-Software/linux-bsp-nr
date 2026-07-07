@@ -5581,6 +5581,71 @@
 					<&scmi_devpd X5H_POWER_DOMAIN_ID_GPCB1>;
 		};
 
+
+        x5h_audio: x5h-audio@ec500000 {
+            compatible = "renesas,x5h-audio";
+            reg = <0x0 0xec500000 0x0 0x21004>,  /* SCU   */
+                  <0x0 0xec530000 0x0 0x140>,    /* ADG   */
+                  <0x0 0xec540000 0x0 0x9a004>,  /* SSIU  */
+                  <0x0 0xec740000 0x0 0x1c030>;  /* audmapp */
+            reg-names = "scu", "adg", "ssiu", "audmapp";
+            clocks = <&scmi_clk X5H_CLOCK_ID_ADG0>, <&scmi_clk X5H_CLOCK_ID_SSI0>,
+                <&scmi_clk X5H_CLOCK_ID_SCU0>,
+                /*SSI 0-9 Clocks*/
+                <&scmi_clk X5H_CLOCK_ID_SSI09>, <&scmi_clk X5H_CLOCK_ID_SSI08>,
+                <&scmi_clk X5H_CLOCK_ID_SSI07>, <&scmi_clk X5H_CLOCK_ID_SSI06>,
+                <&scmi_clk X5H_CLOCK_ID_SSI05>, <&scmi_clk X5H_CLOCK_ID_SSI04>,
+                <&scmi_clk X5H_CLOCK_ID_SSI03>, <&scmi_clk X5H_CLOCK_ID_SSI02>,
+                <&scmi_clk X5H_CLOCK_ID_SSI01>, <&scmi_clk X5H_CLOCK_ID_SSI00>,
+                /*SRC 0-9 Clocks*/
+                <&scmi_clk X5H_CLOCK_ID_SRC09>, <&scmi_clk X5H_CLOCK_ID_SRC08>,
+                <&scmi_clk X5H_CLOCK_ID_SRC07>, <&scmi_clk X5H_CLOCK_ID_SRC06>,
+                <&scmi_clk X5H_CLOCK_ID_SRC05>, <&scmi_clk X5H_CLOCK_ID_SRC04>,
+                <&scmi_clk X5H_CLOCK_ID_SRC03>, <&scmi_clk X5H_CLOCK_ID_SRC02>,
+                <&scmi_clk X5H_CLOCK_ID_SRC01>, <&scmi_clk X5H_CLOCK_ID_SRC00>,
+                /*MIX and CTU shares same clock*/
+                <&scmi_clk X5H_CLOCK_ID_SCU01>, <&scmi_clk X5H_CLOCK_ID_SCU00>,
+                <&scmi_clk X5H_CLOCK_ID_SCU01>, <&scmi_clk X5H_CLOCK_ID_SCU00>,
+                /*DVC 0 and 1 clocks*/
+                <&scmi_clk X5H_CLOCK_ID_DVC00>, <&scmi_clk X5H_CLOCK_ID_DVC01>,
+                /*DMA 0 and 1 clocks*/
+                <&scmi_clk X5H_CLOCK_ID_APD00>, <&scmi_clk X5H_CLOCK_ID_APD01>,
+                /*Audio clocks A,B and C (fixed clocks)*/
+                <&audio_clk_a>, <&audio_clk_b>, <&audio_clk_c>;
+
+            clock-names = "adg", "ssi-all", "scu-all",
+                          "ssi9", "ssi8", "ssi7", "ssi6",
+                          "ssi5", "ssi4", "ssi3", "ssi2", "ssi1", "ssi0",
+                          "src9", "src8", "src7", "src6",
+                          "src5", "src4", "src3", "src2", "src1", "src0",
+                          "mix1", "mix0", "ctu1", "ctu0",
+                          "dvc0", "dvc1", "dmapp.0", "dmapp.1",
+                          "clk_a", "clk_b", "clk_c";
+
+            pinctrl-0 = <&sound_clk_pins>, <&sound_pins>;
+            pinctrl-names = "default";
+            #sound-dai-cells = <1>;
+            clock-frequency = <12288000>;
+            status = "disabled";
+
+            dmas = <&audio_dmac0 0x13>, <&audio_dmac0 0x11>,
+                   <&audio_dmac0 0x0F>, <&audio_dmac0 0x0D>,
+                   <&audio_dmac0 0x0B>, <&audio_dmac0 0x09>,
+                   <&audio_dmac0 0x07>, <&audio_dmac0 0x05>,
+                   <&audio_dmac0 0x03>, <&audio_dmac0 0x01>,
+                   <&audio_dmac0 0x14>, <&audio_dmac0 0x12>,
+                   <&audio_dmac0 0x10>, <&audio_dmac0 0x0E>,
+                   <&audio_dmac0 0x0C>, <&audio_dmac0 0x0A>,
+                   <&audio_dmac0 0x08>, <&audio_dmac0 0x06>,
+                   <&audio_dmac0 0x04>, <&audio_dmac0 0x02>;
+            dma-names = "src0_rx", "src1_rx", "src2_rx",
+                        "src3_rx", "src4_rx", "src5_rx",
+                        "src6_rx", "src7_rx", "src8_rx", "src9_rx",
+                        "src0_tx", "src1_tx", "src2_tx",
+                        "src3_tx", "src4_tx", "src5_tx",
+                        "src6_tx", "src7_tx", "src8_tx", "src9_tx";
+        };
+
 		rcar_sound: sound@ec500000 {
 			/*
 			 * #sound-dai-cells is required

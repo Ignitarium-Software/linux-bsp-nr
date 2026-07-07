@@ -187,8 +187,8 @@ void x5h_audio_set_period_cb(struct x5h_audio *ctx, int stream_id,
 			     void (*cb)(void *), void *data);
 
 /* --- DMA engine management --- */
-int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id,
-			const char *dma_name, dma_addr_t dst_addr);
+int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id, 
+        const char *dma_name, dma_addr_t dst_addr);
 void x5h_audio_dma_teardown(struct x5h_audio *ctx, int stream_id);
 int x5h_audio_dma_start(struct x5h_audio *ctx, int stream_id);
 void x5h_audio_dma_stop(struct x5h_audio *ctx, int stream_id);

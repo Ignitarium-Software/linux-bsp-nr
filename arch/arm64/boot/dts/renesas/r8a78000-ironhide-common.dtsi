@@ -1387,41 +1387,8 @@
 	};
 };
 
-				/* src0: src-0 { */
-				/*     interrupts = <GIC_SPI 916 IRQ_TYPE_LEVEL_HIGH>; */
-				/*     dmas = <&audio_dmac0 0x13>, <&audio_dmac1 0x14>; */
-				/*     dma-names = "rx", "tx"; */
-				/* }; */
-                /*  */
-&soc {
-    x5h_audio: x5h-audio@ec500000 {
-        compatible = "renesas,x5h-audio";
-        reg = <0x0 0xec500000 0x0 0x21004>,  /* SCU   */
-              <0x0 0xec530000 0x0 0x140>,    /* ADG   */
-              <0x0 0xec540000 0x0 0x9a004>,  /* SSIU  */
-              <0x0 0xec740000 0x0 0x1c030>;  /* audmapp */
-        reg-names = "scu", "adg", "ssiu", "audmapp";
-        clocks = <&scmi_clk X5H_CLOCK_ID_ADG0>, <&scmi_clk X5H_CLOCK_ID_SSI0>, <&scmi_clk X5H_CLOCK_ID_SCU0>,
-                 <&scmi_clk X5H_CLOCK_ID_SSI05>,
-                 <&scmi_clk X5H_CLOCK_ID_SRC02>, <&scmi_clk X5H_CLOCK_ID_SRC00>,
-                 <&scmi_clk X5H_CLOCK_ID_DVC00>,
-                 <&scmi_clk X5H_CLOCK_ID_SCU00>,
-                 <&scmi_clk X5H_CLOCK_ID_APD00>, <&scmi_clk X5H_CLOCK_ID_APD01>,
-                 <&audio_clk_a>, <&audio_clk_b>, <&audio_clk_c>;
-        clock-names = "adg", "ssi-all", "scu-all", 
-                      "ssi", "src", "src2", "dvc", "ctu",
-                      "dmapp.0", "dmapp.1",
-                      "clk_a", "clk_b", "clk_c";
-        dmas = <&audio_dmac1 0x2C>,  /* TX: SSI5 BUSIF0 */
-               <&audio_dmac0 0x13>,  /* RX: SRC0 input (mem->SRC) */
-               <&audio_dmac1 0x0F>;  /* RX: SRC2 input (mem->SRC) */
-        dma-names = "tx", "rx", "rx2";
-        pinctrl-0 = <&sound_clk_pins>, <&sound_pins>;
-        pinctrl-names = "default";
-        #sound-dai-cells = <1>;
-        clock-frequency = <12288000>;
-        status = "okay";
-    };
+&x5h_audio {
+    status = "okay";
 };
 
 &rsw3_clk {

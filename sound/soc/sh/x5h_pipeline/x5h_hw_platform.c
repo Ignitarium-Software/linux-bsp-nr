@@ -61,11 +61,13 @@ struct x5h_hw_priv {
  *  DT parsing
  * ============================================================================
  */
+#define RES_NAME_LEN 10
 static int x5h_parse_dt(struct x5h_hw_priv *priv, struct platform_device *pdev)
 {
 	struct x5h_audio_config *cfg = &priv->cfg;
 	struct resource *res;
 	unsigned int busif;
+    char res_name[RES_NAME_LEN];
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "scu");
 	if (!res)
@@ -101,11 +103,21 @@ static int x5h_parse_dt(struct x5h_hw_priv *priv, struct platform_device *pdev)
 	priv->clk_ssi = devm_clk_get(&pdev->dev, "ssi-all");
 	priv->clk_scu = devm_clk_get(&pdev->dev, "scu-all");
 
-	priv->clk_ssi_idx = devm_clk_get(&pdev->dev, "ssi");
-	priv->clk_src_idx = devm_clk_get(&pdev->dev, "src");
-	priv->clk_src2_idx = devm_clk_get(&pdev->dev, "src2");
-	priv->clk_dvc_idx = devm_clk_get(&pdev->dev, "ctu");
-	priv->clk_ctu_idx = devm_clk_get(&pdev->dev, "dvc");
+    snprintf(res_name, RES_NAME_LEN, "ssi%d", X5H_AUDIO_SSI_ID);
+	priv->clk_ssi_idx = devm_clk_get(&pdev->dev, res_name);
+
+    snprintf(res_name, RES_NAME_LEN, "src%d", X5H_AUDIO_SRC_ID);
+	priv->clk_src_idx = devm_clk_get(&pdev->dev, res_name);
+
+    snprintf(res_name, RES_NAME_LEN, "src%d", X5H_AUDIO_SRC_ID2);
+    priv->clk_src2_idx = devm_clk_get(&pdev->dev, res_name);
+
+    snprintf(res_name, RES_NAME_LEN, "dvc%d", X5H_AUDIO_CTU_ID);
+    priv->clk_dvc_idx = devm_clk_get(&pdev->dev, res_name);
+
+    snprintf(res_name, RES_NAME_LEN, "ctu%d", X5H_AUDIO_DVC_ID);
+	priv->clk_ctu_idx = devm_clk_get(&pdev->dev, res_name);
+
 	priv->clk_dmapp1 = devm_clk_get(&pdev->dev, "dmapp.0");
 	priv->clk_dmapp2 = devm_clk_get(&pdev->dev, "dmapp.1");
 
@@ -190,8 +202,8 @@ static void x5h_dma_complete(void *data)
 		ctx->period_cb[id](ctx->period_cb_data[id]);
 }
 
-int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id,
-			const char *dma_name, dma_addr_t dst_addr)
+int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id, 
+        const char *dma_name, dma_addr_t dst_addr)
 {
 	struct dma_chan *chan;
 	struct dma_slave_config cfg;
@@ -203,7 +215,7 @@ int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id,
 	    stream_id >= X5H_AUDIO_MAX_STREAMS)
 		return -EINVAL;
 
-	chan = dma_request_chan(ctx->dev, dma_name);
+    chan = dma_request_chan(ctx->dev, dma_name);
 	if (IS_ERR(chan))
 		return PTR_ERR(chan);
 
@@ -397,6 +409,7 @@ static int x5h_audio_probe(struct platform_device *pdev)
 	struct x5h_audio *ctx;
 	dma_addr_t src_dst[2];
 	int ret, i;
+    char res_name[RES_NAME_LEN];
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -427,13 +440,15 @@ static int x5h_audio_probe(struct platform_device *pdev)
 		     + (0x1000 * priv->cfg.src_id2);
 
 	/* Acquire DMA channels and allocate PCM buffers for both streams */
-	ret = x5h_audio_dma_setup(ctx, 0, "rx", src_dst[0]);
+    snprintf(res_name, RES_NAME_LEN, "src%d_rx", X5H_AUDIO_SRC_ID);
+	ret = x5h_audio_dma_setup(ctx, 0, res_name, src_dst[0]);
 	if (ret) {
 		dev_err(&pdev->dev, "DMA setup stream 0 failed: %d\n", ret);
 		goto err_clocks;
 	}
 
-	ret = x5h_audio_dma_setup(ctx, 1, "rx2", src_dst[1]);
+    snprintf(res_name, RES_NAME_LEN, "src%d_rx", X5H_AUDIO_SRC_ID2);
+	ret = x5h_audio_dma_setup(ctx, 1, res_name, src_dst[1]);
 	if (ret) {
 		dev_err(&pdev->dev, "DMA setup stream 1 failed: %d\n", ret);
 		goto err_dma0;
