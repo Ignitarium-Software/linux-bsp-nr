@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Device Tree Source for the Ironhide board
+ *
+ * Copyright (C) 2026 Renesas Electronics Corp.
+ */
+
+#include "r8a78000-ironhide-common.dtsi"
+
+&i2c6 {
+	status = "disabled";
+};
+
+&audio_dmac0 {
+	status = "disabled";
+};
+
+&audio_dmac1 {
+	status = "disabled";
+};
+
+&audio_dmac2 {
+	status = "disabled";
+};
+
+&audio_dmac3 {
+	status = "disabled";
+};
+
+&rcar_sound {
+	status = "disabled";
+};
+
+&sound_mux {
+	status = "disabled";
+};
