@@ -150,22 +150,37 @@
 			linux,cma-default;
 		};
 
-		dsp_ram: dsp-ram@be800000 {
+		dsp_iccm0: dsp_iccm0@cc000000 {
+			reg = <0x0 0xcc000000 0x0 0x8000>;
+			no-map;
+		};
+
+		dsp_dccm0: dsp_dccm0@cc080000 {
+			reg = <0x0 0xcc080000 0x0 0x10000>;
+			no-map;
+		};
+
+		dsp_vccm0: dsp_vccm0@cf400000 {
+			reg = <0x0 0xcf400000 0x0 0x40000>;
+			no-map;
+		};
+
+		dsp_fw0: dsp_fw0@be800000 {
 			reg = <0x0 0xbe800000 0x0 0x100000>;
 			no-map;
 		};
 
-		dsp_carv: dsp-carv@bfefd000 {
+		dsp_rsc_table0: dsp_rsc_table0@bfefd000 {
 			reg = <0x0 0xbfefd000 0x0 0x1000>;
 			no-map;
 		};
 
-		dsp_log: dsp-log@bfefe000 {
+		dsp_log0: dsp_log0@bfefe000 {
 			reg = <0x0 0xbfefe000 0x0 0x2000>;
 			no-map;
 		};
 
-		dsp_vring: dsp-vring@bff00000 {
+		dsp_buf_pool0: dsp_buf_pool0@bff00000 {
 			compatible = "shared-dma-pool";
 			reg = <0x0 0xbff00000 0x0 0xc0000>;
 			no-map;
@@ -471,8 +486,12 @@
 };
 
 &dsp_rproc0 {
-	carveout-region = <&dsp_carv>;
-	memory-region = <&dsp_vring>;
+	iccm-region = <&dsp_iccm0>;
+	dccm-region = <&dsp_dccm0>;
+	vccm-region = <&dsp_vccm0>;
+	fw-region = <&dsp_fw0>;
+	rsc-table-region = <&dsp_rsc_table0>;
+	memory-region = <&dsp_buf_pool0>;
 	status = "okay";
 };
 

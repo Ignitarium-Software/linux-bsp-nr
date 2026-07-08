@@ -5820,11 +5820,17 @@
 
 		dsp_rproc0: dsp_0 {
 			compatible = "renesas,rcar-dsp-rproc";
-			reg = <0x0 0xcbe80000 0x0 0x10000>;
-			reg-names = "ch0";
+			reg = <0x0 0xcbe00000 0x0 0x10000>,
+			      <0x0 0xcbe80000 0x0 0x10000>,
+			      <0x0 0xcbe90000 0x0 0x10000>,
+			      <0x0 0xcf000000 0x0 0x400000>;
+			reg-names = "vpx5_rg_ctrl", "arcsync_reg_ctrl",
+				    "mdlc_reg20", "arcsync_axi_slave";
 			interrupt-parent = <&gic>;
 			interrupts = <GIC_SPI 703 IRQ_TYPE_EDGE_RISING>;
 			interrupt-names = "ch0";
+			cluster-id = <0>;
+			core-id = <0>;
 			status = "disabled";
 		};
 
