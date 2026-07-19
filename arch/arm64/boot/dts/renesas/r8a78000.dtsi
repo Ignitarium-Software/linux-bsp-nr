@@ -5637,13 +5637,15 @@
                    <&audio_dmac0 0x10>, <&audio_dmac0 0x0E>,
                    <&audio_dmac0 0x0C>, <&audio_dmac0 0x0A>,
                    <&audio_dmac0 0x08>, <&audio_dmac0 0x06>,
-                   <&audio_dmac0 0x04>, <&audio_dmac0 0x02>;
+                   <&audio_dmac0 0x04>, <&audio_dmac0 0x02>,
+                   <&audio_dmac1 0x2C>;
             dma-names = "src0_rx", "src1_rx", "src2_rx",
                         "src3_rx", "src4_rx", "src5_rx",
                         "src6_rx", "src7_rx", "src8_rx", "src9_rx",
                         "src0_tx", "src1_tx", "src2_tx",
                         "src3_tx", "src4_tx", "src5_tx",
-                        "src6_tx", "src7_tx", "src8_tx", "src9_tx";
+                        "src6_tx", "src7_tx", "src8_tx", "src9_tx",
+                        "ssiu50_tx";
         };
 
 		rcar_sound: sound@ec500000 {

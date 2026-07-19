@@ -68,7 +68,7 @@
 #define X5H_AUDIO_SSIU_BUSIF		0
 #endif
 
-#define X5H_AUDIO_MAX_STREAMS		2
+#define X5H_AUDIO_MAX_STREAMS		3
 #define X5H_AUDIO_PCM_BUFFER_SIZE	(64 * 1024)
 #define X5H_AUDIO_PCM_PERIOD_SIZE	4096
 #define X5H_AUDIO_PCM_PERIODS_MAX	16
@@ -128,6 +128,12 @@ struct x5h_audio_config {
 struct x5h_dma_cb_wrapper {
 	struct x5h_audio *ctx;
 	int stream_id;
+};
+
+enum {
+    X5H_STREAM_ID_PB0 = 0,
+    X5H_STREAM_ID_PB1,
+    X5H_STREAM_ID_CAP,
 };
 
 /* ============================================================================
@@ -201,6 +207,8 @@ int  x5h_audio_start(struct x5h_audio *ctx);
 void x5h_audio_stop(struct x5h_audio *ctx);
 void x5h_audio_deinit(struct x5h_audio *ctx);
 
+void x5h_ssi_reinit(struct x5h_audio *ctx);
+void x5h_audio_set_direction(struct x5h_audio *ctx, int is_play);
 void x5h_audio_set_playback_volume(struct x5h_audio *ctx, u32 vol[8]);
 void x5h_audio_set_playback_mute(struct x5h_audio *ctx, unsigned int ch,
 				 bool mute);

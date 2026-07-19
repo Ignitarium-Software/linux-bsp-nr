@@ -269,12 +269,12 @@
         clock-frequency = <12288000>;
     };
 
+#if 0
 	sound_mux: sound-mux {
 		compatible = "simple-audio-mux";
 		mux-gpios = <&gpio6 21 GPIO_ACTIVE_HIGH>;
 		state-labels = "Playback", "Capture";
 	};
-#if 0
 	sound_card: sound {
 		compatible = "simple-audio-card";
 
@@ -297,7 +297,7 @@
         compatible = "simple-audio-card";
 
         simple-audio-card,name = "rcar-sound";
-        simple-audio-card,aux-devs = <&sound_mux>;
+        /* simple-audio-card,aux-devs = <&sound_mux>; */
         simple-audio-card,format = "i2s";
         simple-audio-card,bitclock-master = <&sndcpu0>;
         simple-audio-card,frame-master = <&sndcpu0>;
@@ -1388,6 +1388,7 @@
 };
 
 &x5h_audio {
+    muxsel-gpios = <&gpio6 21 GPIO_ACTIVE_HIGH>;
     status = "okay";
 };
 

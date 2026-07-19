@@ -20,6 +20,7 @@
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/gpio/consumer.h>
 
 #include "x5h_audio.h"
 
@@ -44,6 +45,7 @@ struct x5h_hw_priv {
 	struct clk *clk_b;
 	struct clk *clk_c;
 	struct clk *clkout;
+    struct gpio_desc *mux_sel;
 
 	void __iomem *scu_base;
 	phys_addr_t   scu_phys_base;
@@ -144,6 +146,10 @@ static int x5h_parse_dt(struct x5h_hw_priv *priv, struct platform_device *pdev)
 	device_property_read_u32(&pdev->dev, "clock-frequency",
 				 (u32 *)&cfg->clkout_rate);
 
+    priv->mux_sel = devm_gpiod_get(&pdev->dev, "muxsel", GPIOD_OUT_LOW);
+	if (IS_ERR(priv->mux_sel))
+		return PTR_ERR(priv->mux_sel);
+
 	cfg->sample_rate = X5H_AUDIO_SAMPLE_RATE;
 	cfg->channels    = X5H_AUDIO_CHANNELS;
 	cfg->bit_width   = X5H_AUDIO_BIT_WIDTH;
@@ -228,10 +234,15 @@ int x5h_audio_dma_setup(struct x5h_audio *ctx, int stream_id,
 	}
 
 	memset(&cfg, 0, sizeof(cfg));
-	cfg.direction		= DMA_MEM_TO_DEV;
+    if(stream_id == X5H_STREAM_ID_CAP) {
+        cfg.direction = DMA_DEV_TO_MEM;
+        cfg.src_addr		= dst_addr;
+    } else {
+        cfg.direction = DMA_MEM_TO_DEV;
+        cfg.dst_addr		= dst_addr;
+    }
 	cfg.src_addr_width	= DMA_SLAVE_BUSWIDTH_4_BYTES;
 	cfg.dst_addr_width	= DMA_SLAVE_BUSWIDTH_4_BYTES;
-	cfg.dst_addr		= dst_addr;
 	ret = dmaengine_slave_config(chan, &cfg);
 	if (ret) {
 		dma_free_coherent(chan->device->dev,
@@ -256,6 +267,7 @@ int x5h_audio_dma_start(struct x5h_audio *ctx, int stream_id)
 {
 	struct dma_chan *chan;
 	struct dma_async_tx_descriptor *desc;
+	enum dma_transfer_direction buff_dir = DMA_MEM_TO_DEV;
 
 	if (!ctx || stream_id < 0 || stream_id >= X5H_AUDIO_MAX_STREAMS)
 		return -EINVAL;
@@ -264,11 +276,14 @@ int x5h_audio_dma_start(struct x5h_audio *ctx, int stream_id)
 	if (!chan || ctx->dma_running[stream_id])
 		return -EINVAL;
 
+	if(stream_id == X5H_STREAM_ID_CAP)
+		buff_dir = DMA_DEV_TO_MEM;
+
 	desc = dmaengine_prep_dma_cyclic(chan,
 			ctx->pcm_buf_dma[stream_id],
 			ctx->pcm_buf_size,
 			X5H_AUDIO_PCM_PERIOD_SIZE,
-			DMA_MEM_TO_DEV,
+			buff_dir,
 			DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!desc)
 		return -EIO;
@@ -354,6 +369,23 @@ void x5h_audio_dma_teardown(struct x5h_audio *ctx, int stream_id)
 }
 EXPORT_SYMBOL_GPL(x5h_audio_dma_teardown);
 
+void x5h_audio_set_direction(struct x5h_audio *ctx, int is_play)
+{
+    struct x5h_hw_priv *priv;
+    const struct x5h_audio_config *cfg = ctx->cfg;
+    if( is_play != cfg->is_playback ) {
+        priv = dev_get_drvdata(ctx->dev);
+        if(is_play) {
+            gpiod_set_value(priv->mux_sel, 0);
+        } else {
+            gpiod_set_value(priv->mux_sel, 1);
+        }
+        priv->cfg.is_playback = is_play;
+        x5h_ssi_reinit(ctx);
+    }
+}
+EXPORT_SYMBOL_GPL(x5h_audio_set_direction);
+
 /* ============================================================================
  *  Clocks enable/disable helpers
  * ============================================================================
@@ -408,6 +440,7 @@ static int x5h_audio_probe(struct platform_device *pdev)
 	struct x5h_hw_priv *priv;
 	struct x5h_audio *ctx;
 	dma_addr_t src_dst[2];
+	dma_addr_t ssiu_src;
 	int ret, i;
     char res_name[RES_NAME_LEN];
 
@@ -439,19 +472,31 @@ static int x5h_audio_probe(struct platform_device *pdev)
 	src_dst[1] = priv->scu_phys_base - 0x00500000
 		     + (0x1000 * priv->cfg.src_id2);
 
+    /* 
+     * (addr - 0x00440000 + (0x8000 * (i)) + (0x1000 * (j)))
+     * */
+    ssiu_src = priv->ssiu_phys_base - 0x00440000 + (0x8000 * priv->cfg.ssi_id);
+
 	/* Acquire DMA channels and allocate PCM buffers for both streams */
     snprintf(res_name, RES_NAME_LEN, "src%d_rx", X5H_AUDIO_SRC_ID);
-	ret = x5h_audio_dma_setup(ctx, 0, res_name, src_dst[0]);
+	ret = x5h_audio_dma_setup(ctx, X5H_STREAM_ID_PB0, res_name, src_dst[0]);
 	if (ret) {
 		dev_err(&pdev->dev, "DMA setup stream 0 failed: %d\n", ret);
 		goto err_clocks;
 	}
 
     snprintf(res_name, RES_NAME_LEN, "src%d_rx", X5H_AUDIO_SRC_ID2);
-	ret = x5h_audio_dma_setup(ctx, 1, res_name, src_dst[1]);
+	ret = x5h_audio_dma_setup(ctx, X5H_STREAM_ID_PB1, res_name, src_dst[1]);
 	if (ret) {
 		dev_err(&pdev->dev, "DMA setup stream 1 failed: %d\n", ret);
 		goto err_dma0;
+	}
+
+    snprintf(res_name, RES_NAME_LEN, "ssiu50_tx");
+	ret = x5h_audio_dma_setup(ctx, X5H_STREAM_ID_CAP, res_name, ssiu_src);
+	if (ret) {
+		dev_err(&pdev->dev, "DMA setup stream 2 failed: %d\n", ret);
+		goto err_dma1;
 	}
 
 	/* Configure hardware pipeline */
@@ -506,6 +551,8 @@ err_dma_stop:
 err_deinit:
 	x5h_audio_deinit(ctx);
 err_teardown:
+	x5h_audio_dma_teardown(ctx, 2);
+err_dma1:
 	x5h_audio_dma_teardown(ctx, 1);
 err_dma0:
 	x5h_audio_dma_teardown(ctx, 0);

@@ -1049,6 +1049,24 @@ static int x5h_mix_init(struct x5h_audio *ctx)
  *  Pipeline orchestration — Public API
  * ============================================================================
  */
+void x5h_ssi_reinit(struct x5h_audio *ctx)
+{
+	const struct x5h_audio_config *cfg = ctx->cfg;
+	if (cfg->is_playback) {
+        x5h_cmd_start(ctx);
+        x5h_src_start(ctx, 0);
+        x5h_src_start(ctx, 1);
+    } else {
+        x5h_cmd_stop(ctx);
+        x5h_src_stop(ctx, 0);
+        x5h_src_stop(ctx, 1);
+    }
+	x5h_ssi_config_init(ctx);
+	x5h_ssi_register_setup(ctx);
+	x5h_ssi_status_clear(ctx);
+}
+EXPORT_SYMBOL_GPL(x5h_ssi_reinit);
+
 int x5h_audio_init(struct x5h_audio *ctx)
 {
 	int ret;

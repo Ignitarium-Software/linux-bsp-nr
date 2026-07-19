@@ -50,15 +50,25 @@ static const struct snd_pcm_hardware x5h_pcm_hardware = {
  *  DAI operations
  * ============================================================================
  */
+static int x5h_stream_id(struct snd_soc_dai *dai,
+        struct snd_pcm_substream *substream)
+{
+    if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+        return X5H_STREAM_ID_CAP;
+    return dai->id;
+}
+
 static int x5h_soc_startup(struct snd_pcm_substream *substream,
-			   struct snd_soc_dai *dai)
+        struct snd_soc_dai *dai)
 {
 	struct x5h_audio *ctx = x5h_audio_get_global_instance();
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	int id = dai->id;
+	int id = x5h_stream_id(dai, substream);
 
 	if (!ctx)
 		return -ENODEV;
+
+	x5h_audio_set_direction(ctx, substream->stream == SNDRV_PCM_STREAM_PLAYBACK);
 
 	snd_soc_set_runtime_hwparams(substream, &x5h_pcm_hardware);
 
@@ -84,7 +94,7 @@ static int x5h_soc_trigger(struct snd_pcm_substream *substream, int cmd,
 			   struct snd_soc_dai *dai)
 {
 	struct x5h_audio *ctx = x5h_audio_get_global_instance();
-	int id = dai->id;
+	int id = x5h_stream_id(dai, substream);
 
 	if (!ctx)
 		return -ENODEV;
@@ -114,9 +124,10 @@ static void x5h_soc_shutdown(struct snd_pcm_substream *substream,
 			     struct snd_soc_dai *dai)
 {
 	struct x5h_audio *ctx = x5h_audio_get_global_instance();
+	int id = x5h_stream_id(dai, substream);
 
 	if (ctx)
-		x5h_audio_set_period_cb(ctx, dai->id, NULL, NULL);
+		x5h_audio_set_period_cb(ctx, id, NULL, NULL);
 }
 
 static int x5h_soc_set_dai_tdm_slot(struct snd_soc_dai *dai,
@@ -178,7 +189,7 @@ static snd_pcm_uframes_t x5h_soc_pointer(struct snd_soc_component *component,
 	struct x5h_audio *ctx = x5h_audio_get_global_instance();
 	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
-	int id = cpu_dai->id;
+	int id = x5h_stream_id(cpu_dai, substream);
 	unsigned int pos;
 
 	if (!ctx)
@@ -242,14 +253,6 @@ static struct snd_soc_dai_driver x5h_dai[] = {
 		.name = "x5h-dai-1",
 		.id = 1,
 		.playback = {
-			.rates		= SNDRV_PCM_RATE_8000_192000,
-			.formats	= SNDRV_PCM_FMTBIT_S16_LE |
-					  SNDRV_PCM_FMTBIT_S24_LE |
-					  SNDRV_PCM_FMTBIT_S32_LE,
-			.channels_min	= 1,
-			.channels_max	= 8,
-		},
-		.capture = {
 			.rates		= SNDRV_PCM_RATE_8000_192000,
 			.formats	= SNDRV_PCM_FMTBIT_S16_LE |
 					  SNDRV_PCM_FMTBIT_S24_LE |
