@@ -547,21 +547,21 @@ static int rcar_audio_fe_pcm_close(struct snd_pcm_substream *sub)
 }
 
 static int rcar_audio_fe_pcm_copy_user(struct snd_pcm_substream *substream,
-		int channel, unsigned long pos,
-		void __user *buf, unsigned long bytes)
+        int channel, unsigned long pos,
+        struct iov_iter *iter, unsigned long bytes)
 {
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	void *hwbuf = runtime->dma_area + pos;
-
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (copy_from_user(hwbuf, buf, bytes))
-			return -EFAULT;
-	} else {
-		if (copy_to_user(buf, hwbuf, bytes))
-			return -EFAULT;
-	}
-
-	return 0;
+    struct snd_pcm_runtime *runtime = substream->runtime;
+    void *hwbuf = runtime->dma_area + pos;
+ 
+    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+        if (copy_from_iter(hwbuf, bytes, iter) != bytes)
+            return -EFAULT;
+    } else {
+        if (copy_to_iter(hwbuf, bytes, iter) != bytes)
+            return -EFAULT;
+    }
+ 
+    return 0;
 }
 
 static const struct snd_pcm_ops rcar_audio_pcm_ops = {
@@ -573,7 +573,7 @@ static const struct snd_pcm_ops rcar_audio_pcm_ops = {
 	.trigger   = rcar_audio_fe_pcm_trigger,
 	.pointer   = rcar_audio_fe_pcm_pointer,
 	.mmap      = rcar_audio_fe_pcm_mmap,
-	.copy_user = rcar_audio_fe_pcm_copy_user,
+	.copy = rcar_audio_fe_pcm_copy_user,
 };
 
 /* ALSA card + PCM creation */
@@ -897,7 +897,7 @@ static int rcar_audio_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int rcar_audio_remove(struct platform_device *pdev)
+static void rcar_audio_remove(struct platform_device *pdev)
 {
 	struct rcar_alsa_priv *d = platform_get_drvdata(pdev);
 
@@ -911,7 +911,6 @@ static int rcar_audio_remove(struct platform_device *pdev)
 	global_alsa_priv[d->group_id] = NULL;
 
 	dev_info(&pdev->dev, "rcar_audio_fe: platform driver removed\n");
-	return 0;
 }
 
 static const struct of_device_id rcar_audio_of_match[] = {
