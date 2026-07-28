@@ -479,6 +479,16 @@ static int rcar_audio_fe_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
 	case SNDRV_PCM_TRIGGER_STOP:
 		pr_info("rcar_audio_fe: %s STOP\n", __func__);
 
+        /* notify CR */
+        msg.header.version = CR_CTRL_RPMSG_VERSION;
+        msg.header.msg_type = TRIGGER_STOP;
+        msg.header.msg_id = 1;
+        msg.header.stream_id =
+            (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
+        msg.header.payload_len = sizeof(struct open_req_msg);
+
+        rpmsg_send_cr(msg, d);
+
 		/* Notify DSP */
 		msg.header.version = DSP_CTRL_RPMSG_VERSION;
 		msg.header.msg_type = PCM_STOP;
@@ -490,15 +500,6 @@ static int rcar_audio_fe_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
 
 		rpmsg_send_dsp(msg, d);
 
-        /* notify CR */
-        msg.header.version = CR_CTRL_RPMSG_VERSION;
-        msg.header.msg_type = TRIGGER_STOP;
-        msg.header.msg_id = 1;
-        msg.header.stream_id =
-            (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-        msg.header.payload_len = sizeof(struct open_req_msg);
-
-        rpmsg_send_cr(msg, d);
 		return 0;
 
 	case SNDRV_PCM_TRIGGER_SUSPEND:
