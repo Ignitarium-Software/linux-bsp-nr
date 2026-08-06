@@ -35,13 +35,26 @@
 #define DSP_RESP_TIMEOUT_MS (100U)
 #define CR_RESP_TIMEOUT_MS (100U)
 
+/* audio format info */
+struct hw_audio_format {
+	uint64_t format;
+	uint32_t rate;
+	uint32_t channels;
+	size_t period_frames;
+	size_t period_bytes;
+	uint32_t hw_periods;
+};
+
 /* Per-stream state */
 struct rcar_alsa_stream {
 	size_t hw_ptr_bytes;
 	size_t hw_buf_size;
-	dma_addr_t hw_dma_handle;
 	uint64_t hw_phy_addr;
 	void *hw_cpu_addr;
+	struct hw_audio_format format;
+
+	/* stream_id from CR core */
+	uint32_t stream_id;
 };
 
 /* debugfs entries */
@@ -98,6 +111,9 @@ struct rcar_alsa_priv {
 	struct dentry *dbg_root;
 	struct dsp_dbg_stream dbg_playback;
 	struct dsp_dbg_stream dbg_capture;
+
+	/* bitmask for active streams */
+	uint32_t active_streams;
 };
 
 struct rpmsg_work {
@@ -108,98 +124,191 @@ struct rpmsg_work {
 
 struct rcar_alsa_priv *global_alsa_priv[MAX_DEVICES];
 
-static int rpmsg_send_cr(struct rpmsg_packet msg, struct rcar_alsa_priv *d)
+/* Transmit request or command to remote processor via rpmsg */
+static int rpmsg_send_remote(uint8_t remote, struct rpmsg_packet msg,
+		uint32_t *id, struct rcar_alsa_priv *d)
 {
-	if (!d->cr_rpdev) {
-		pr_err("rcar_audio_fe: %s failed: No rpmsg_device available\n",
-				__func__);
+	static uint32_t msg_id = 0;
+	struct rpmsg_device *rpmsg_dev =
+		(remote == REMOTE_CR) ? d->cr_rpdev : d->dsp_rpdev;
+
+	if (!rpmsg_dev) {
+		pr_err("%s(%s) failed: No rpmsg_device available\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP");
 		return -ENODEV;
 	}
 
-	return rpmsg_send(d->cr_rpdev->ept, &msg, sizeof(msg));
+	if (++msg_id == U32_MAX)
+		msg_id = 1;
+
+	*id = msg.header.msg_id = msg_id;
+	return rpmsg_send(rpmsg_dev->ept, &msg, sizeof(msg));
 }
 
-static int rpmsg_send_dsp(struct rpmsg_packet msg, struct rcar_alsa_priv *d)
-{
-	if (!d->dsp_rpdev) {
-		pr_err("rcar_audio_fe: %s failed: No rpmsg_device available\n",
-				__func__);
-		return -ENODEV;
-	}
-
-	return rpmsg_send(d->dsp_rpdev->ept, &msg, sizeof(msg));
-}
-
-static int rpmsg_recv_cr_blocking(int *msg_type, struct open_resp_msg *response,
-		unsigned int timeout_ms, struct rcar_alsa_priv *d)
+/* Receive response from remote processor via rpmsg */
+static int rpmsg_receive_remote(uint8_t remote, uint16_t msg_type,
+		uint32_t msg_id, uint32_t stream_id,
+		union rpmsg_payload *response, uint32_t timeout_ms,
+		struct rcar_alsa_priv *d)
 {
 	long ret;
 	unsigned long flags;
+	wait_queue_head_t *wq;
+	spinlock_t *status_lock;
+	volatile bool *reply_flag;
+	volatile struct rpmsg_packet *reply_msg;
 
-	ret = wait_event_interruptible_timeout(d->cr_wait_q,
-			READ_ONCE(d->cr_reply_flag),
+	wq = (remote == REMOTE_CR) ? &d->cr_wait_q : &d->dsp_wait_q;
+	status_lock = (remote == REMOTE_CR) ?
+		&d->cr_status_lock : &d->dsp_status_lock;
+	reply_flag = (remote == REMOTE_CR) ?
+		&d->cr_reply_flag : &d->dsp_reply_flag;
+	reply_msg = (remote == REMOTE_CR) ?
+		&d->cr_reply_msg : &d->dsp_reply_msg;
+
+	ret = wait_event_interruptible_timeout(*wq, READ_ONCE(*reply_flag),
 			msecs_to_jiffies(timeout_ms));
 
 	if (ret == 0) {
-		pr_err("%s: timeout\n", __func__);
+		pr_err("%s (%s): timeout\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP");
 		return -ETIMEDOUT;
 	}
 
 	if (ret < 0) {
-		pr_err("%s: error(%ld)\n", __func__, ret);
+		pr_err("%s (%s): error(%ld)\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP", ret);
 		return ret;
 	}
 
-	pr_info("%s: got response after %dms, timeout %dms\n", __func__,
-			(timeout_ms - jiffies_to_msecs(ret)), timeout_ms);
-
-	spin_lock_irqsave(&d->cr_status_lock, flags);
-	if (!d->cr_reply_flag) {
-		spin_unlock_irqrestore(&d->cr_status_lock, flags);
+	spin_lock_irqsave(status_lock, flags);
+	if (!reply_flag) {
+		spin_unlock_irqrestore(status_lock, flags);
 		return -EAGAIN;
 	}
 
-	*response = d->cr_reply_msg.payload.open_resp;
-	*msg_type = d->cr_reply_msg.header.msg_type;
-	d->cr_reply_flag = false;
-	spin_unlock_irqrestore(&d->cr_status_lock, flags);
+	if (reply_msg->header.msg_id != msg_id) {
+		pr_err("%s (%s): wrong msg_id(%u)\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP",
+			reply_msg->header.msg_id);
+		return -EAGAIN;
+	}
+
+	if (reply_msg->header.msg_type != msg_type) {
+		pr_err("%s (%s): wrong msg_type(%u)\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP",
+			reply_msg->header.msg_type);
+		return -EAGAIN;
+	}
+
+	if ((msg_type != OPEN_RESP) &&
+			(stream_id != reply_msg->header.stream_id)) {
+		pr_err("%s (%s): wrong stream_id(%u)\n",
+			__func__, (remote == REMOTE_CR) ? "CR" : "DSP",
+			reply_msg->header.stream_id);
+		return -EAGAIN;
+	}
+
+	*response = reply_msg->payload;
+	*reply_flag = false;
+	spin_unlock_irqrestore(status_lock, flags);
 
 	return 0;
 }
 
-static int rpmsg_recv_dsp_blocking(int *msg_type, struct dsp_status_msg *status,
-		unsigned int timeout_ms, struct rcar_alsa_priv *d)
+/* Transmit request to remote processor, and
+ * get back the response from remote if
+ * response parameter passed is not NULL
+ */
+static inline int rpmsg_request_remote(uint8_t remote, struct rpmsg_packet msg,
+		union rpmsg_payload *response, struct rcar_alsa_priv *d)
 {
-	long ret;
-	unsigned long flags;
+	int ret;
+	uint32_t msg_id;
+	uint32_t timeout_ms = (remote == REMOTE_CR) ?
+		CR_RESP_TIMEOUT_MS : DSP_RESP_TIMEOUT_MS;
 
-	ret = wait_event_interruptible_timeout(d->dsp_wait_q,
-			READ_ONCE(d->dsp_reply_flag),
-			msecs_to_jiffies(timeout_ms));
-
-	if (ret == 0) {
-		pr_err("%s: timeout\n", __func__);
-		return -ETIMEDOUT;
-	}
-
-	if (ret < 0) {
-		pr_err("%s: error(%ld)\n", __func__, ret);
+	ret = rpmsg_send_remote(remote, msg, &msg_id, d);
+	if (ret)
 		return ret;
+
+	if (response != NULL) {
+		return rpmsg_receive_remote(remote,
+				msg.header.msg_type | REPLY_MSG_MASK,
+				msg_id, msg.header.stream_id,
+				response, timeout_ms, d);
 	}
 
-	pr_info("%s: got response after %dms, timeout %dms\n", __func__,
-			(timeout_ms - jiffies_to_msecs(ret)), timeout_ms);
+	return 0;
+}
 
-	spin_lock_irqsave(&d->dsp_status_lock, flags);
-	if (!d->dsp_reply_flag) {
-		spin_unlock_irqrestore(&d->dsp_status_lock, flags);
-		return -EAGAIN;
+/* Trigger PCM events to remote processor and getback the response */
+static int trigger_request_remote(uint32_t stream_id, uint8_t remote,
+		uint16_t cmd, struct rcar_alsa_priv *d)
+{
+	struct rpmsg_packet msg;
+	int ret;
+
+	/* header */
+	msg.header.version = (remote == REMOTE_CR) ?
+		CR_CTRL_RPMSG_VERSION : DSP_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = cmd;
+	msg.header.stream_id = stream_id;
+	msg.header.payload_len = sizeof(struct trigger_req);
+
+	/* payload */
+	msg.payload.trigger.cmd = cmd;
+
+	/* trigger request to remote */
+	return rpmsg_request_remote(remote, msg, NULL, d);
+}
+
+static inline int get_pcm_format(uint32_t format, uint64_t *pcm_format)
+{
+	switch (format) {
+	case FORMAT_S8:
+		*pcm_format = SNDRV_PCM_FMTBIT_S8;
+		break;
+	case FORMAT_U8:
+		*pcm_format = SNDRV_PCM_FMTBIT_U8;
+		break;
+	case FORMAT_S16_LE:
+		*pcm_format = SNDRV_PCM_FMTBIT_S16_LE;
+		break;
+	case FORMAT_S16_BE:
+		*pcm_format = SNDRV_PCM_FMTBIT_S16_BE;
+		break;
+	case FORMAT_U16_LE:
+		*pcm_format = SNDRV_PCM_FMTBIT_U16_LE;
+		break;
+	case FORMAT_U16_BE:
+		*pcm_format = SNDRV_PCM_FMTBIT_U16_BE;
+		break;
+	case FORMAT_S24_LE:
+		*pcm_format = SNDRV_PCM_FMTBIT_S24_LE;
+		break;
+	case FORMAT_S24_BE:
+		*pcm_format = SNDRV_PCM_FMTBIT_S24_BE;
+		break;
+	default:
+		return -EINVAL;
 	}
 
-	*status = d->dsp_reply_msg.payload.dsp_status;
-	*msg_type = d->dsp_reply_msg.header.msg_type;
-	d->dsp_reply_flag = false;
-	spin_unlock_irqrestore(&d->dsp_status_lock, flags);
+	return 0;
+}
+
+static inline int get_pcm_rate(uint32_t rate, uint32_t *pcm_rate)
+{
+	switch (rate) {
+	case RATE_44100:
+		*pcm_rate = SNDRV_PCM_RATE_44100;
+		break;
+	case RATE_48000:
+		*pcm_rate = SNDRV_PCM_RATE_48000;
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -208,22 +317,84 @@ static int rcar_alsa_fe_pcm_open(struct snd_pcm_substream *sub)
 {
 	struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
 	struct snd_pcm_runtime *runtime = sub->runtime;
+	struct rcar_alsa_stream *s =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		&d->rcar_pb_stream : &d->rcar_cap_stream;
+	struct rpmsg_packet msg;
+	int ret;
+	union rpmsg_payload response;
 
 	pr_info("rcar_audio_fe: %s\n", __func__);
 
+	/* CR msg header*/
+	msg.header.version = CR_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = OPEN_REQ;
+	msg.header.payload_len = sizeof(struct open_req_msg);
+
+	/* CR msg Payload */
+	msg.payload.open_req.dir =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		DIR_PLAYBACK: DIR_CAPTURE;
+
+	/* send open requset to CR and get response back */
+	ret = rpmsg_request_remote(REMOTE_CR, msg, &response, d);
+	if (ret < 0)
+		return ret;
+
+	if (response.open_resp.status != STATUS_SUCCESS) {
+		pr_err("rcar_audio_fe: %s: err status from CR, status(%d)\n",
+				__func__, response.open_resp.status);
+		return -EAGAIN;
+	}
+
+	if (!response.open_resp.hw_rb_phys || !response.open_resp.hw_rb_phys) {
+		pr_err("rcar_audio_fe: %s: Bad address / size for rb\n",
+				__func__);
+		return -EAGAIN;
+	}
+
+	/* set per stream parameters */
+	s->stream_id = response.open_resp.stream_id;
+	s->hw_phy_addr = response.open_resp.hw_rb_phys;
+	s->hw_buf_size = response.open_resp.hw_rb_size;
+
+	s->hw_cpu_addr = ioremap(s->hw_phy_addr, s->hw_buf_size);
+	if (!s->hw_cpu_addr) {
+		pr_err("rcar_audio_fe: %s ioremap failed\n",
+				__func__);
+		return -ENOMEM;
+	}
+
+	s->format.format = response.open_resp.hw_format;
+	s->format.rate = response.open_resp.hw_rate;
+	s->format.channels = response.open_resp.hw_channels;
+	s->format.period_frames = response.open_resp.hw_period_frames;
+	s->format.period_bytes = response.open_resp.hw_period_bytes;
+	s->format.hw_periods = response.open_resp.hw_periods;
+
+	/* set runtime hw parameters*/
+	ret = get_pcm_format(s->format.format, &runtime->hw.formats);
+	if (ret < 0)
+		return ret;
+
+	ret = get_pcm_rate(s->format.rate, &runtime->hw.rates);
+	if (ret < 0)
+		return ret;
+
 	runtime->hw.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP |
 		SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER;
-	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE;
-	runtime->hw.rates = SNDRV_PCM_RATE_48000;
-	runtime->hw.rate_min = FRAME_RATE;
-	runtime->hw.rate_max = FRAME_RATE;
-	runtime->hw.channels_min = 2;
-	runtime->hw.channels_max = 2;
-	runtime->hw.buffer_bytes_max = BUFFER_LEN;
-	runtime->hw.period_bytes_min = PERIOD_BYTES;
-	runtime->hw.period_bytes_max = PERIOD_BYTES;
-	runtime->hw.periods_min = 2;
-	runtime->hw.periods_max = (BUFFER_LEN / PERIOD_BYTES);
+	runtime->hw.rate_min = s->format.rate;
+	runtime->hw.rate_max = s->format.rate;
+	runtime->hw.channels_min = s->format.channels;
+	runtime->hw.channels_max = s->format.channels;
+	runtime->hw.buffer_bytes_max = BUFFER_LEN_MAX;
+	runtime->hw.period_bytes_min = s->format.period_bytes;
+	runtime->hw.period_bytes_max = s->format.period_bytes;
+	runtime->hw.periods_min = PERIODS_MIN;
+	runtime->hw.periods_max = (BUFFER_LEN_MAX / s->format.period_bytes);
+
+	/* set stream_id bit in active streams */
+	d->active_streams |= (1 << s->stream_id);
 
 	runtime->private_data = d;
 
@@ -240,79 +411,14 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
 		&d->rcar_pb_stream : &d->rcar_cap_stream;
 	struct rpmsg_packet msg;
-	int type;
 	int ret;
-	struct dsp_status_msg dsp_status;
-	struct open_resp_msg cr_response;
+	union rpmsg_payload response;
 	struct dsp_dbg_stream *dbg;
-	unsigned int periods = params_periods(params);
 
-	if (buffer_bytes > BUFFER_LEN) {
+	if (buffer_bytes > BUFFER_LEN_MAX) {
 		pr_err("rcar_audio_fe: %s error invalid buffer_bytes(%lu)\n",
 				__func__, buffer_bytes);
 		return -EINVAL;
-	}
-
-	/* CR msg header*/
-	msg.header.version = CR_CTRL_RPMSG_VERSION;
-	msg.header.msg_type = OPEN_REQ;
-	msg.header.msg_id = 1;
-	msg.header.stream_id =
-		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-	msg.header.payload_len = sizeof(struct open_req_msg);
-
-	/* CR msg Payload */
-	msg.payload.open_req.dir =
-		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-	msg.payload.open_req.rate = FRAME_RATE;
-	msg.payload.open_req.channels = 2;
-	msg.payload.open_req.format = SNDRV_PCM_FMTBIT_S16_LE;
-	msg.payload.open_req.period_frames = PERIOD_FRAMES;
-	msg.payload.open_req.periods = (buffer_bytes / PERIOD_BYTES);
-	msg.payload.open_req.pcm_rb_phys =
-		(uint64_t)dma_to_phys(&pdev->dev, sub->dma_buffer.addr);
-	msg.payload.open_req.pcm_rb_size = (uint64_t)buffer_bytes;
-
-	ret = rpmsg_send_cr(msg, d);
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* Wait for response from CR */
-	ret = rpmsg_recv_cr_blocking(&type, &cr_response,
-			CR_RESP_TIMEOUT_MS, d);
-	if (ret) {
-		pr_err("rcar_audio_fe: %s: no response from CR ret(%d)\n",
-				__func__, ret);
-		return ret;
-	}
-
-	if (type != OPEN_RESP) {
-		pr_err("rcar_audio_fe: %s: err response from CR, type(0x%x)\n",
-				__func__, type);
-		return -EAGAIN;
-	}
-
-	if (cr_response.status) {
-		pr_err("rcar_audio_fe: %s: err status from CR, type(0x%x)\n",
-				__func__, cr_response.status);
-		return -EAGAIN;
-	}
-
-	if (!cr_response.hw_rb_phys || !cr_response.hw_rb_phys) {
-		pr_err("rcar_audio_fe: %s: Bad address / size for rb\n",
-				__func__);
-		return -EAGAIN;
-	}
-
-	s->hw_phy_addr = cr_response.hw_rb_phys;
-	s->hw_buf_size = cr_response.hw_rb_size;
-
-	s->hw_cpu_addr = ioremap(s->hw_phy_addr, s->hw_buf_size);
-	if (!s->hw_cpu_addr) {
-		pr_err("rcar_audio_fe: %s ioremap failed\n",
-				__func__);
-		return -ENOMEM;
 	}
 
 	dbg = (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
@@ -321,8 +427,8 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	dbg->cpu_addr = s->hw_cpu_addr;
 	dbg->phy_addr = s->hw_phy_addr;
 	dbg->bytes = s->hw_buf_size;
-	dbg->period_bytes = params_period_bytes(params);
-	dbg->periods = periods;
+	dbg->period_bytes = s->format.period_bytes;
+	dbg->periods = s->format.hw_periods;
 	dbg->valid = true;
 	dbg->rd_avail_count = 0;
 	dbg->rd_off = 0;
@@ -331,43 +437,41 @@ static int rcar_audio_fe_pcm_hw_params(struct snd_pcm_substream *sub,
 	mutex_unlock(&dbg->lock);
 
 	/* DSP msg header*/
+	msg.header.version = DSP_CTRL_RPMSG_VERSION;
 	msg.header.msg_type = CONFIG_REQ;
+	msg.header.stream_id = s->stream_id;
 	msg.header.payload_len = sizeof(struct dsp_config_req_msg);
 
 	/* DSP msg Payload */
 	msg.payload.dsp_config.dir =
-		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-	msg.payload.dsp_config.in_rate = FRAME_RATE;
-	msg.payload.dsp_config.in_channels = 2;
-	msg.payload.dsp_config.in_format = SNDRV_PCM_FMTBIT_S16_LE;
-	msg.payload.dsp_config.out_rate = FRAME_RATE;
-	msg.payload.dsp_config.out_channels = 2;
-	msg.payload.dsp_config.out_format = SNDRV_PCM_FMTBIT_S16_LE;
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		DIR_PLAYBACK: DIR_CAPTURE;
+	msg.payload.dsp_config.in_rate = s->format.rate;
+	msg.payload.dsp_config.in_channels = s->format.channels;
+	msg.payload.dsp_config.in_format = s->format.format;
+	msg.payload.dsp_config.out_rate = s->format.rate;
+	msg.payload.dsp_config.out_channels = s->format.channels;
+	msg.payload.dsp_config.out_format = s->format.format;
 	msg.payload.dsp_config.pcm_rb_phys =
 		(uint64_t)dma_to_phys(&pdev->dev, sub->dma_buffer.addr);
 	msg.payload.dsp_config.pcm_rb_size = (uint64_t)buffer_bytes;
 	msg.payload.dsp_config.hw_rb_phys = s->hw_phy_addr;
 	msg.payload.dsp_config.hw_rb_size = (uint64_t)s->hw_buf_size;
-	msg.payload.dsp_config.period_frames = PERIOD_FRAMES;
-	msg.payload.dsp_config.periods = (buffer_bytes / PERIOD_BYTES);
+	msg.payload.dsp_config.period_frames = s->format.period_frames;
+	msg.payload.dsp_config.period_bytes = s->format.period_bytes;
 
-	ret = rpmsg_send_dsp(msg, d);
-	if (ret < 0) {
+	pr_info("%s: hw_rb_phys(0x%llx) pcm_rb_phys(0x%llx)\n", __func__,
+		msg.payload.dsp_config.hw_rb_phys,
+		msg.payload.dsp_config.pcm_rb_phys);
+
+	/* send config requset to DSP and get response back */
+	ret = rpmsg_request_remote(REMOTE_DSP, msg, &response, d);
+	if (ret)
 		return ret;
-	}
 
-	/* Wait for response from DSP */
-	ret = rpmsg_recv_dsp_blocking(&type, &dsp_status,
-			DSP_RESP_TIMEOUT_MS, d);
-	if (ret) {
-		pr_err("rcar_audio_fe: %s: no response from DSP ret(%d)\n",
-				__func__, ret);
-		return ret;
-	}
-
-	if (type != CONFIG_REPLY) {
-		pr_err("rcar_audio_fe: %s: err response from DSP, type(0x%x)\n",
-				__func__, type);
+	if (response.resp.status != STATUS_SUCCESS) {
+		pr_err("rcar_audio_fe: %s: err status from DSP, status(%d)\n",
+				__func__, response.resp.status);
 		return -EAGAIN;
 	}
 
@@ -421,105 +525,79 @@ static int rcar_audio_fe_pcm_prepare(struct snd_pcm_substream *sub)
 static int rcar_audio_fe_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
 {
 	struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
-	struct rpmsg_packet msg;
+	struct rcar_alsa_stream *s =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		&d->rcar_pb_stream : &d->rcar_cap_stream;
+	uint32_t s_id = s->stream_id;
+	int ret;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		pr_info("rcar_audio_fe: %s START\n", __func__);
 
-        /* notify CR */
-        msg.header.version = CR_CTRL_RPMSG_VERSION;
-        msg.header.msg_type = TRIGGER_START;
-        msg.header.msg_id = 1;
-        msg.header.stream_id =
-            (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-        msg.header.payload_len = sizeof(struct open_req_msg);
-
-        rpmsg_send_cr(msg, d);
+		/* notify CR */
+		ret = trigger_request_remote(s_id, REMOTE_CR, TRIGGER_START, d);
+		if (ret < 0)
+			return -EAGAIN;
 
 		/* Notify DSP */
-		msg.header.version = DSP_CTRL_RPMSG_VERSION;
-		msg.header.msg_type = PCM_START;
-		msg.header.msg_id = 1;
-		msg.header.stream_id =
-			(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-        msg.header.payload_len = sizeof(struct trigger_req);
-        msg.payload.trigger.cmd = PCM_START;
+		ret = trigger_request_remote(s_id, REMOTE_DSP, PCM_START, d);
+		if (ret < 0)
+			return -EAGAIN;
 
-		rpmsg_send_dsp(msg, d);
-
-		return 0;
+		break;
 
     case SNDRV_PCM_TRIGGER_RESUME:
 		pr_info("rcar_audio_fe: %s RESUME\n", __func__);
 
-        /* notify CR */
-        msg.header.version = CR_CTRL_RPMSG_VERSION;
-        msg.header.msg_type = TRIGGER_RESUME;
-        msg.header.msg_id = 1;
-        msg.header.stream_id =
-            (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-        msg.header.payload_len = sizeof(struct open_req_msg);
-
-        rpmsg_send_cr(msg, d);
+		/* notify CR */
+		ret = trigger_request_remote(s_id, REMOTE_CR, TRIGGER_RESUME, d);
+		if (ret < 0)
+			return -EAGAIN;
 
 		/* Notify DSP */
-		msg.header.version = DSP_CTRL_RPMSG_VERSION;
-		msg.header.msg_type = PCM_RESUME;
-		msg.header.msg_id = 1;
-		msg.header.stream_id =
-			(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-		msg.header.payload_len = sizeof(struct trigger_req);
-		msg.payload.trigger.cmd = PCM_RESUME;
+		ret = trigger_request_remote(s_id, REMOTE_DSP, PCM_RESUME, d);
+		if (ret < 0)
+			return -EAGAIN;
 
-		rpmsg_send_dsp(msg, d);
-
-		return 0;
+		break;
 
 	case SNDRV_PCM_TRIGGER_STOP:
 		pr_info("rcar_audio_fe: %s STOP\n", __func__);
 
-        /* notify CR */
-        msg.header.version = CR_CTRL_RPMSG_VERSION;
-        msg.header.msg_type = TRIGGER_STOP;
-        msg.header.msg_id = 1;
-        msg.header.stream_id =
-            (sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-        msg.header.payload_len = sizeof(struct open_req_msg);
-
-        rpmsg_send_cr(msg, d);
+		/* notify CR */
+		ret = trigger_request_remote(s_id, REMOTE_CR, TRIGGER_STOP, d);
+		if (ret < 0)
+			return -EAGAIN;
 
 		/* Notify DSP */
-		msg.header.version = DSP_CTRL_RPMSG_VERSION;
-		msg.header.msg_type = PCM_STOP;
-		msg.header.msg_id = 1;
-		msg.header.stream_id =
-			(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-		msg.header.payload_len = sizeof(struct trigger_req);
-		msg.payload.trigger.cmd = PCM_STOP;
+		ret = trigger_request_remote(s_id, REMOTE_DSP, PCM_STOP, d);
+		if (ret < 0)
+			return -EAGAIN;
 
-		rpmsg_send_dsp(msg, d);
-
-		return 0;
+		break;
 
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		pr_info("rcar_audio_fe: %s SUSPEND\n", __func__);
 
-		/* Notify DSP */
-		msg.header.version = DSP_CTRL_RPMSG_VERSION;
-		msg.header.msg_type = PCM_PAUSE;
-		msg.header.msg_id = 1;
-		msg.header.stream_id =
-			(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0: 1;
-		msg.header.payload_len = sizeof(struct trigger_req);
-		msg.payload.trigger.cmd = PCM_PAUSE;
-		rpmsg_send_dsp(msg, d);
+		/* notify CR */
+		ret = trigger_request_remote(s_id, REMOTE_CR, TRIGGER_PAUSE, d);
+		if (ret < 0)
+			return -EAGAIN;
 
-		return 0;
+		/* Notify DSP */
+		ret = trigger_request_remote(s_id, REMOTE_DSP, PCM_PAUSE, d);
+		if (ret < 0)
+			return -EAGAIN;
+
+		break;
 
 	default:
+		pr_err("rcar_audio_fe: %s unknown command(%u)\n", __func__, cmd);
 		return -EINVAL;
 	}
+
+	return 0;
 }
 
 static snd_pcm_uframes_t rcar_audio_fe_pcm_pointer(
@@ -543,7 +621,60 @@ static int rcar_audio_fe_pcm_mmap(struct snd_pcm_substream *sub,
 
 static int rcar_audio_fe_pcm_close(struct snd_pcm_substream *sub)
 {
+	struct rcar_alsa_priv *d = snd_pcm_substream_chip(sub);
+	struct rcar_alsa_stream *s =
+		(sub->stream == SNDRV_PCM_STREAM_PLAYBACK) ?
+		&d->rcar_pb_stream : &d->rcar_cap_stream;
+	uint32_t s_id = s->stream_id;
+	int ret;
+	struct rpmsg_packet msg;
+	union rpmsg_payload response;
+
 	pr_info("rcar_audio_fe: %s\n", __func__);
+
+	/* CR msg header*/
+	msg.header.version = CR_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = TRIGGER_CLOSE;
+	msg.header.stream_id = s->stream_id;
+	msg.header.payload_len = sizeof(struct trigger_req);
+
+	/* CR msg Payload */
+	msg.payload.trigger.cmd = TRIGGER_CLOSE;
+
+	/* send close requset to CR and get response back */
+	ret = rpmsg_request_remote(REMOTE_CR, msg, &response, d);
+	if (ret < 0)
+		return ret;
+
+	if (response.resp.status != STATUS_SUCCESS) {
+		pr_err("rcar_audio_fe: %s: err status from CR, status(%d)\n",
+				__func__, response.resp.status);
+		return -EAGAIN;
+	}
+
+	/* DSP msg header*/
+	msg.header.version = DSP_CTRL_RPMSG_VERSION;
+	msg.header.msg_type = PCM_CLOSE;
+	msg.header.stream_id = s->stream_id;
+	msg.header.payload_len = sizeof(struct trigger_req);
+
+	/* DSP msg Payload */
+	msg.payload.trigger.cmd = PCM_CLOSE;
+
+	/* send config requset to DSP and get response back */
+	ret = rpmsg_request_remote(REMOTE_DSP, msg, &response, d);
+	if (ret)
+		return ret;
+
+	if (response.resp.status != STATUS_SUCCESS) {
+		pr_err("rcar_audio_fe: %s: err status from DSP, status(%d)\n",
+				__func__, response.resp.status);
+		return -EAGAIN;
+	}
+
+	/* clear stream_id bit in active streams */
+	d->active_streams &= ~(1 << s->stream_id);
+
 	return 0;
 }
 
@@ -551,18 +682,18 @@ static int rcar_audio_fe_pcm_copy_user(struct snd_pcm_substream *substream,
         int channel, unsigned long pos,
         struct iov_iter *iter, unsigned long bytes)
 {
-    struct snd_pcm_runtime *runtime = substream->runtime;
-    void *hwbuf = runtime->dma_area + pos;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	void *hwbuf = runtime->dma_area + pos;
  
-    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-        if (copy_from_iter(hwbuf, bytes, iter) != bytes)
-            return -EFAULT;
-    } else {
-        if (copy_to_iter(hwbuf, bytes, iter) != bytes)
-            return -EFAULT;
-    }
- 
-    return 0;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if (copy_from_iter(hwbuf, bytes, iter) != bytes)
+		return -EFAULT;
+	} else {
+		if (copy_to_iter(hwbuf, bytes, iter) != bytes)
+			return -EFAULT;
+	}
+
+	return 0;
 }
 
 static const struct snd_pcm_ops rcar_audio_pcm_ops = {
@@ -605,7 +736,7 @@ static int rcar_audio_pcm_create(struct platform_device *pdev,
 			&rcar_audio_pcm_ops);
 
 	snd_pcm_set_managed_buffer_all(d->pcm, SNDRV_DMA_TYPE_DEV, &pdev->dev,
-			BUFFER_LEN, BUFFER_LEN);
+			BUFFER_LEN_MAX, BUFFER_LEN_MAX);
 
 	/* Register the card */
 	ret = snd_card_register(d->card);
@@ -646,7 +777,9 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 		dbg->rd_avail_count++;
 	} else {
 		/* Discard old periodic frame */
-		dbg->rd_off = (dbg->rd_off + dbg->period_bytes) % (dbg->periods * dbg->period_bytes);
+		dbg->rd_off =
+			(dbg->rd_off + dbg->period_bytes) %
+			(dbg->periods * dbg->period_bytes);
 	}
 
 	/* Advance hardware pointer */
@@ -659,7 +792,9 @@ static void dsp_pcm_handle_period(int stream_dir,  struct rcar_alsa_priv *d)
 		dbg->wr_avail_count++;
 	} else {
 		/* Advance write offset */
-		dbg->wr_off = (dbg->wr_off + dbg->period_bytes) % (dbg->periods * dbg->period_bytes);
+		dbg->wr_off =
+			(dbg->wr_off + dbg->period_bytes) %
+			(dbg->periods * dbg->period_bytes);
 	}
 
 	/* Tell ALSA a period elapsed */
@@ -675,14 +810,17 @@ static ssize_t rcar_audio_dbg_buf_read(struct file *file, char __user *ubuf,
 	ssize_t ret;
 
 	mutex_lock(&dbg->lock);
-	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes || !dbg->rd_avail_count) {
+	if (!dbg->valid || !dbg->cpu_addr ||
+			!dbg->bytes || !dbg->rd_avail_count) {
 		mutex_unlock(&dbg->lock);
 		return -ENODATA;
 	}
 
 	n = dbg->period_bytes;
 	snapshot = kmemdup(dbg->cpu_addr + dbg->rd_off, n, GFP_KERNEL);
-	dbg->rd_off = (dbg->rd_off + dbg->period_bytes) % (dbg->periods * dbg->period_bytes);
+	dbg->rd_off =
+		(dbg->rd_off + dbg->period_bytes) %
+		(dbg->periods * dbg->period_bytes);
 	dbg->rd_avail_count--;
 	mutex_unlock(&dbg->lock);
 
@@ -705,7 +843,8 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 
 	mutex_lock(&dbg->lock);
 
-	if (!dbg->valid || !dbg->cpu_addr || !dbg->bytes || !dbg->wr_avail_count) {
+	if (!dbg->valid || !dbg->cpu_addr ||
+			!dbg->bytes || !dbg->wr_avail_count) {
 		mutex_unlock(&dbg->lock);
 		return -ENODATA;
 	}
@@ -720,7 +859,9 @@ static ssize_t rcar_audio_dbg_buf_write(struct file *file,
 
 	memcpy(dbg->cpu_addr + dbg->wr_off, tmp, dbg->period_bytes);
 	*ppos = 0;
-	dbg->wr_off = (dbg->wr_off + dbg->period_bytes) % (dbg->periods * dbg->period_bytes);
+	dbg->wr_off =
+		(dbg->wr_off + dbg->period_bytes) %
+		(dbg->periods * dbg->period_bytes);
 	dbg->wr_avail_count--;
 	mutex_unlock(&dbg->lock);
 
@@ -963,6 +1104,12 @@ static void rpmsg_cr_handle(struct work_struct *work)
 
 	switch(msg->header.msg_type) {
 	case OPEN_RESP:
+	case EVENT_STARTED:
+	case EVENT_PAUSED:
+	case EVENT_RESUMED:
+	case EVENT_STOPPED:
+	case EVENT_CLOSED:
+	case POS_REPLY_CR:
 		spin_lock_irqsave(&d->cr_status_lock, flags);
 		if (d->cr_reply_flag) {
 			/* drop unhandled previous message */
@@ -982,8 +1129,14 @@ static void rpmsg_cr_handle(struct work_struct *work)
 		}
 		break;
 
+	case EVENT_XRUN:
+	case EVENT_HP_TAKEOVER:
+	case EVENT_HP_RELEASED:
+	case EVENT_ERROR:
+		break;
+
 	default:
-		pr_warn("audio_ctrl_rpmsg: unknown dsp message type %u\n",
+		pr_warn("audio_ctrl_rpmsg: unknown cr message type %u\n",
 				msg->header.msg_type);
 		break;
 	}
@@ -1001,6 +1154,11 @@ static void rpmsg_dsp_handle(struct work_struct *work)
 
 	switch(msg->header.msg_type) {
 	case CONFIG_REPLY:
+	case PCM_STARTED:
+	case PCM_PAUSED:
+	case PCM_RESUMED:
+	case PCM_STOPED:
+	case PCM_CLOSED:
 	case POS_REPLY:
 		spin_lock_irqsave(&d->dsp_status_lock, flags);
 		if (d->dsp_reply_flag) {
