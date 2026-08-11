@@ -1104,10 +1104,6 @@ static void rpmsg_cr_handle(struct work_struct *work)
 
 	switch(msg->header.msg_type) {
 	case OPEN_RESP:
-	case EVENT_STARTED:
-	case EVENT_PAUSED:
-	case EVENT_RESUMED:
-	case EVENT_STOPPED:
 	case EVENT_CLOSED:
 	case POS_REPLY_CR:
 		spin_lock_irqsave(&d->cr_status_lock, flags);
@@ -1129,10 +1125,20 @@ static void rpmsg_cr_handle(struct work_struct *work)
 		}
 		break;
 
+	case EVENT_STARTED:
+	case EVENT_PAUSED:
+	case EVENT_RESUMED:
+	case EVENT_STOPPED:
 	case EVENT_XRUN:
 	case EVENT_HP_TAKEOVER:
 	case EVENT_HP_RELEASED:
 	case EVENT_ERROR:
+		if (msg->payload.resp.status != STATUS_SUCCESS) {
+			pr_warn("%s: Received error response(%d) "
+					"for trigger request(0x%x)",
+					__func__, msg->payload.resp.status,
+					msg->header.msg_type);
+		}
 		break;
 
 	default:
@@ -1154,10 +1160,6 @@ static void rpmsg_dsp_handle(struct work_struct *work)
 
 	switch(msg->header.msg_type) {
 	case CONFIG_REPLY:
-	case PCM_STARTED:
-	case PCM_PAUSED:
-	case PCM_RESUMED:
-	case PCM_STOPED:
 	case PCM_CLOSED:
 	case POS_REPLY:
 		spin_lock_irqsave(&d->dsp_status_lock, flags);
@@ -1181,6 +1183,18 @@ static void rpmsg_dsp_handle(struct work_struct *work)
 
 	case PCM_STATUS:
 		dsp_pcm_handle_period(msg->payload.dsp_status.dir, d);
+		break;
+
+	case PCM_STARTED:
+	case PCM_PAUSED:
+	case PCM_RESUMED:
+	case PCM_STOPED:
+		if (msg->payload.resp.status != STATUS_SUCCESS) {
+			pr_warn("%s: Received error response(%d) "
+					"for trigger request(0x%x)",
+					__func__, msg->payload.resp.status,
+					msg->header.msg_type);
+		}
 		break;
 
 	default:
